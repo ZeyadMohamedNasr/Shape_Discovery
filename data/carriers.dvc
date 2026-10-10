@@ -1,0 +1,6 @@
+outs:
+- md5: 3908746dcd794f7fada9c0a18936cfdc.dir
+  size: 289195082
+  nfiles: 93
+  hash: md5
+  path: carriers

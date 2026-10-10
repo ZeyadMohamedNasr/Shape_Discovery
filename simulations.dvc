@@ -1,0 +1,6 @@
+outs:
+- md5: 8cb2a78d375fb8fd1f46611d933ffbed.dir
+  size: 9864430266
+  nfiles: 175
+  hash: md5
+  path: simulations
