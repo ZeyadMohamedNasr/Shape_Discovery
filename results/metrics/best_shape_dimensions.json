@@ -1,0 +1,28 @@
+{
+  "segments": [
+    {
+      "kind": "vertical wall (H)",
+      "x_nm": 156.25,
+      "y_top_nm": 110.0,
+      "y_bottom_nm": -110.0,
+      "length_nm": 220.0,
+      "depth_top_nm": 0.0,
+      "depth_bottom_nm": 220.0
+    }
+  ],
+  "summary": {
+    "interface_length_nm": 220.0,
+    "n_segments": 1,
+    "widest_step_W_nm": 0.0,
+    "tallest_wall_H_nm": 220.0,
+    "smallest_feature_nm": 220.0,
+    "cell_width_nm": 31.25,
+    "cell_heights_nm": [
+      43.333333333333314,
+      43.33333333333335,
+      43.33333333333334,
+      45.00000000000001,
+      44.999999999999986
+    ]
+  }
+}

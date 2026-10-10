@@ -1,0 +1,16 @@
+# Temporary and auto-generated CAD files
+*.log
+~#*
+*.data
+
+# Heavy simulation binaries & matrices (managed by DVC or kept local)
+simulations/
+data/carriers/
+*.ldev
+*.lms
+*.mat
+*.npz
+
+# Python cache
+__pycache__/
+*.pyc
