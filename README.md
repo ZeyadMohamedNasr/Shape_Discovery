@@ -34,8 +34,3 @@
 * Predicts basic VpiLpi and loss costs without requiring f3dB bandwidth metrics.
 * Runs sequential Lumerical evaluations without multiprocessing for simple debugging.
 * Refines top shapes without testing random unguided mutations.
-
-## 6. refine_from_history.py (Obsolete)
-* Outdated refinement script containing a broken import statement (`import shape_discovery`).
-* Causes `ModuleNotFoundError` due to script renaming; superseded by `refine_from_history_2.py`.
-* Excluded from active repository tracking.
