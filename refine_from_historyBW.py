@@ -22,10 +22,9 @@ from DiscoverJuncBW import NX, NROWS, NY_SLAB
 # =============================================================================
 # Configuration VVCVCV
 # =============================================================================
-# CHANGE: Ensure we are pulling the history file safely from the project directory
-HISTORY_FILES = [os.path.join(sd.RES_DIR, f"history_nx{sd.NX}.json")]
-MERGED_HISTORY = os.path.join(sd.RES_DIR, "history_all.json")
-RUN_SIMULATIONS = True          # True = Launch Lumerical and run the optimization!
+HISTORY_FILES = ["results/metrics/history_bw.json"]
+MERGED_HISTORY = "results/metrics/history_bw_refined.json"
+RUN_SIMULATIONS = True
 N_ROUNDS = 4                    # refit-and-propose cycles
 N_NEW_PER_ROUND = 6             # Lumerical simulations per round  -> total = N_ROUNDS * N_NEW_PER_ROUND
 TOP_K_PARENTS = 6               # candidates are built around the K best shapes
@@ -169,7 +168,7 @@ if __name__ == "__main__":
         raise SystemExit(f"No usable history for doping model '{sd.DOPING_MODEL}' - check HISTORY_FILES "
                          "and DOPING_MODEL_OVERRIDE.")
     summary(records)
-    sd.plot_gallery(records, os.path.join(sd.PROJECT_DIR, "top_shapes_before_refine.png"))
+    sd.plot_gallery(records, "results/plots/top_shapes_before_refine.png")
 
     if not RUN_SIMULATIONS:
         for g, pred, std in propose(records, seen, rng):
@@ -218,18 +217,19 @@ if __name__ == "__main__":
         if "f3db_ghz" in final:
             print(f"  C = {final['C_pF_per_mm']:.3f} pF/mm | R = {final['R_ohm_mm']:.2f} ohm.mm | "
                   f"f3dB(RC) = {final['f3db_ghz']:.1f} GHz")
-        dims = sd.report_dimensions(best_g, os.path.join(sd.PROJECT_DIR, "best_shape_refined_dimensions.json"))
+        dims = sd.report_dimensions(best_g, "results/metrics/best_shape_refined_dimensions.json")
 
-        with open(os.path.join(sd.PROJECT_DIR, "best_shape_refined.json"), "w") as f:
+        with open("results/metrics/best_shape_refined.json", "w") as f:
             json.dump({"setup": sd.setup_tag(), "grid_rows_top_to_bottom_p_is_1": best_g.astype(int).tolist(),
                        "dimensions": dims, "metrics": final, "n_simulations_total": len(records)}, f, indent=2)
-        sd.plot_full_section(best_g, os.path.join(sd.PROJECT_DIR, "best_refined_full_section.png"))
-        sd.plot_best_shape(best_g, f"Best refined junction   cost = {final['cost']:.2f}   (numbers = segment length in nm)",
-                           os.path.join(sd.PROJECT_DIR, "best_refined_doping.png"),
-                           os.path.join(sd.PROJECT_DIR, "best_refined_doping.npz"))
-        sd.plot_gallery(records, os.path.join(sd.PROJECT_DIR, "top_shapes_refined.png"))
-        sd.plot_scatter(records, final, os.path.join(sd.PROJECT_DIR, "scatter_and_convergence_refined.png"))
-        print(f"\nSaved in {sd.PROJECT_DIR}")
+                       
+        sd.plot_full_section(best_g, "results/plots/best_refined_full_section.png")
+        sd.plot_best_shape(best_g, f"Best refined junction   cost = {final['cost']:.2f}",
+                           "results/plots/best_refined_doping.png",
+                           "results/metrics/best_refined_doping.npz")
+        sd.plot_gallery(records, "results/plots/top_shapes_refined.png")
+        sd.plot_scatter(records, final, "results/plots/scatter_and_convergence_refined.png")
+        print(f"\nSaved results, plots and Lumerical projects to results/ folders!")
 
         plt.show(block=False)
         plt.pause(0.5)
