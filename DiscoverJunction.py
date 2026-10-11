@@ -868,7 +868,7 @@ if __name__ == "__main__":
         os.replace(old_hist, backup)
         print(f"Previous history saved as {backup}")
 
-    print("Launching Lumerical CHARGE and MODE...")
+    print("DiscoverJunction: Launching Lumerical CHARGE and MODE...")
     try:
         charge_app = lum.DEVICE(hide=not SHOW_GUI)
         mode_app = lum.MODE(hide=not SHOW_GUI)
@@ -881,7 +881,7 @@ if __name__ == "__main__":
             print("\n".join("     " + "".join("p" if v else "n" for v in row) for row in g))
             rec = {"grid": g.astype(int).tolist(), "label": label, "gen": gen, "doping": DOPING_MODEL}
             try:
-                r = evaluate(charge_app, mode_app, g, "eval")
+                r = evaluate(charge_app, mode_app, g, "eval_basic")
                 cost = r["vpilpi"] * abs(r["avg_loss"])
                 ok = bool(np.isfinite(cost))
                 rec.update(r, ok=ok, cost=float(cost) if ok else PENALTY)

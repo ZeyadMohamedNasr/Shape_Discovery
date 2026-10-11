@@ -1414,7 +1414,7 @@ if __name__ == "__main__":
         os.replace(old_hist, backup)
         print(f"Previous history saved as {backup}")
 
-    print("Launching Lumerical CHARGE and MODE...")
+    print("DiscoverJunctiondiffParentsLaunching Lumerical CHARGE and MODE...")
     try:
         charge_app = lum.DEVICE(hide=not SHOW_GUI)
         mode_app = lum.MODE(hide=not SHOW_GUI)
