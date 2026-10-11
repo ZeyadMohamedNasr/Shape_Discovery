@@ -11,3 +11,4 @@ git commit -m "%msg%"
 git push origin main
 
 echo Done!
+@REM  .\uploadgithub.bat  : run this command in the terminal to push on github

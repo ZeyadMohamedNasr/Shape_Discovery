@@ -31,7 +31,7 @@ HISTORY_FILES = ["results/metrics/history_junction.json"]
 MERGED_HISTORY = "results/metrics/history_junction_refined.json" # written after every new simulation
 
 RUN_SIMULATIONS = True         # False = analysis + proposals only (no Lumerical)
-N_ROUNDS = 4                    # refit-and-propose cycles
+N_ROUNDS = 10                   # refit-and-propose cycles
 N_NEW_PER_ROUND = 6             # Lumerical simulations per round  -> total = N_ROUNDS * N_NEW_PER_ROUND
 TOP_K_PARENTS = 6               # candidates are built around the K best shapes
 N_RANDOM_PER_PARENT = 400       # random 2-flip / block mutations per parent (plus all 1-cell flips)

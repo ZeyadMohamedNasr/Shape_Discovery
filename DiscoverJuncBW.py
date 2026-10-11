@@ -108,7 +108,7 @@ N_ENERGY_EV = 80e3              # phosphorus energy
 # The core area (x: +-250 nm, y: -110..+110 nm) is cut into NX columns and NY_SLAB + NY_RIDGE rows.
 # Row edges are aligned with the slab top, so cells never straddle the rib/slab step.
 # Smallest feature = cell size (here 50 nm x 43-45 nm). More cells = richer shapes, bigger search.
-NX = 16
+NX = 10
 NY_SLAB = 2                     # rows between the bottom and the slab top
 NY_RIDGE = 3                    # rows between the slab top and the top of the core
 NROWS = NY_SLAB + NY_RIDGE
@@ -132,7 +132,7 @@ PENALTY = 1e6
 # penalty to designs slower than that.  The weights can be changed later without re-simulating
 # (refine_from_history.py recomputes the cost from the stored VpiLpi, loss and f3dB).
 USE_BANDWIDTH = True
-W_VPI, W_LOSS, W_BW = 2, 0.5, 1.0
+W_VPI, W_LOSS, W_BW = 5, 0.5, 1.0
 REF_BW_GHZ = 50.0
 MIN_BANDWIDTH_GHZ = 0.0
 # Caughey-Thomas mobility (300 K, cm^2/Vs): (mu_min, mu_max, N_ref [cm^-3], alpha) - used for R only
@@ -284,55 +284,25 @@ def from_p_counts(fracs):
 
 
 
-# SEED_SHAPES = {                                   # p fraction per row, top -> bottom
-#     "vertical": [0.5, 0.5, 0.5, 0.5, 0.5],
-#     "M-like":   [1.0, 0.4, 0.7, 0.4, 0.5],
-#     "stacked":  [1.0, 1.0, 1.0, 0.1, 0.1],
-#     "comb":     [0.3, 0.7, 0.3, 0.7, 0.3],
-# }
-SEED_SHAPES = {
-    "vertical": [0.5, 0.5, 0.5, 0.5, 0.5],     # 8 cells p, 8 cells n (250 nm / 250 nm)
-    "M-like":   [1.0, 0.5, 0.75, 0.5, 0.5],    # 16, 8, 12, 8, 8 cells p
-    "stacked":  [1.0, 1.0, 1.0, 0.25, 0.25],   # Top solid p (16), bottom 4 cells p (125 nm)
-    "comb":     [0.25, 0.75, 0.25, 0.75, 0.25], # Alternating 4 (125 nm) and 12 (375 nm) cells p
+SEED_SHAPES = {                                   # p fraction per row, top -> bottom
+    "vertical": [0.5, 0.5, 0.5, 0.5, 0.5],
+    "M-like":   [1.0, 0.4, 0.7, 0.4, 0.5],
+    "stacked":  [1.0, 1.0, 1.0, 0.1, 0.1],
+    "comb":     [0.3, 0.7, 0.3, 0.7, 0.3],
 }
-def w_shape_genome():
-    """
-    Matches the paper's exact P and N distribution for NX=16.
-    P (Red) = Left wall, Bottom arm, Upward tooth.
-    N (Blue) = Right wall, Top arm, Downward tooth.
+def w_shape_genome(x_left=2, w2=3, w1=3, h_left=2, h_right=3):
+    """W-shaped interface (all sizes in cells; rows counted from the top).
+
+      x_left : p columns left of the n tooth      w2 : width of the n tooth      (image: W2)
+      w1     : width of the p pocket right of it  (image: W1)
+      h_left : rows of p above the n tooth        (image: H-left)
+      h_right: rows the p pocket reaches down     (image: H-right)
     """
     g = np.zeros((NROWS, NX), dtype=bool)
-
-    # 1. Solid Left Wall (P-type): columns 0 to 3
-    g[:, 0:4] = True
-
-    # 2. Bottom Arm (P-type): bottom row, spanning under the N tooth
-    g[NROWS-1, 4:12] = True
-
-    # 3. Upward Tooth (P-type): columns 8 to 11, starting below the top row
-    g[1:NROWS, 8:12] = True
-
-    # The remaining cells stay False (N-type). 
-    # This automatically creates the Right Wall, the Top Arm, and the Downward Tooth.
+    g[:, :x_left] = True                                       # left wall, p all the way down
+    g[:h_left, x_left:x_left + w2] = True                      # p cap above the n tooth
+    g[:h_right, x_left + w2:x_left + w2 + w1] = True           # p pocket beside the tooth
     return repair(g)
-
-
-
-
-# def w_shape_genome(x_left=2, w2=3, w1=3, h_left=2, h_right=3):
-#     """W-shaped interface (all sizes in cells; rows counted from the top).
-
-#       x_left : p columns left of the n tooth      w2 : width of the n tooth      (image: W2)
-#       w1     : width of the p pocket right of it  (image: W1)
-#       h_left : rows of p above the n tooth        (image: H-left)
-#       h_right: rows the p pocket reaches down     (image: H-right)
-#     """
-#     g = np.zeros((NROWS, NX), dtype=bool)
-#     g[:, :x_left] = True                                       # left wall, p all the way down
-#     g[:h_left, x_left:x_left + w2] = True                      # p cap above the n tooth
-#     g[:h_right, x_left + w2:x_left + w2 + w1] = True           # p pocket beside the tooth
-#     return repair(g)
 
 
 
