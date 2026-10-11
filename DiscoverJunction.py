@@ -24,20 +24,28 @@ import time
 import importlib.util
 import numpy as np
 import matplotlib.pyplot as plt
+import shutil
+import glob
+
+os.makedirs("results/plots", exist_ok=True)
+os.makedirs("results/metrics", exist_ok=True)
+os.makedirs("carriers", exist_ok=True)
+os.makedirs("simulations", exist_ok=True)
+
+# Define the unique history file for this specific script
+HISTORY_FILE = "results/metrics/history_junction.json"
+global_best_cost = float('inf')
 
 # =============================================================================
 # Configuration
 # =============================================================================
 LUMAPI_PATH = r"C:\Program Files\Lumerical\v241\api\python\lumapi.py"
-PROJECT_DIR = os.path.abspath(".")  # Assuming you run scripts from the Shape_Discovery folder
+PROJECT_DIR = os.path.abspath(".") 
 SIM_DIR = os.path.join(PROJECT_DIR, "simulations")
-DATA_DIR = os.path.join(PROJECT_DIR, "data", "carriers")
+DATA_DIR = os.path.join(PROJECT_DIR, "carriers") # Fixed to point directly to carriers
 RES_DIR = os.path.join(PROJECT_DIR, "results")
 
-for d in [SIM_DIR, DATA_DIR, RES_DIR]:
-    os.makedirs(d, exist_ok=True)
-    SHOW_GUI = True                 # True = Lumerical windows stay open and visible
-
+SHOW_GUI = True
 # Device geometry
 CORE_WIDTH = 500e-9
 CORE_HEIGHT = 220e-9
@@ -647,8 +655,44 @@ def evaluate(charge, mode, g, tag):
     mat_0v = run_charge(charge, boxes, 0.0, tag)
     mat_2v = run_charge(charge, boxes, -VOLTAGE_SWING, tag)
     print("  -> MODE (FDE)")
-    return run_fde(mode, mat_0v, mat_2v, tag)
+    out = run_fde(mode, mat_0v, mat_2v, tag)
 
+    # === SAVE BEST RUN & AUTO-CLEANUP LOGIC ===
+    global global_best_cost
+    if out is not None and "vpilpi" in out and "avg_loss" in out:
+        # For this script, cost = VpiLpi * abs(loss)
+        current_run_score = out["vpilpi"] * abs(out["avg_loss"])
+        
+        # 1. Protect the best run
+        if current_run_score < global_best_cost:
+            global_best_cost = current_run_score
+            print(f"\n*** NEW BEST SHAPE FOUND (Score: {current_run_score:.3f})! Saving files... ***")
+            best_files = [
+                (f"simulations/S_{tag}_0.0V.ldev", "simulations/BEST_JUNCTION_0.0V.ldev"),
+                (f"simulations/S_{tag}_2.0V.ldev", "simulations/BEST_JUNCTION_2.0V.ldev"),
+                (f"simulations/S_{tag}_optical_0V.lms", "simulations/BEST_JUNCTION_optical_0V.lms"),
+                (f"simulations/S_{tag}_optical_-2V.lms", "simulations/BEST_JUNCTION_optical_-2V.lms")
+            ]
+            for src, dest in best_files:
+                if os.path.exists(src):
+                    shutil.copy(src, dest)
+
+    # 2. Delete the heavy temporary files
+    files_to_delete = [
+        f"simulations/S_{tag}_0.0V.ldev", f"simulations/S_{tag}_2.0V.ldev",
+        f"simulations/S_{tag}_optical_0V.lms", f"simulations/S_{tag}_optical_-2V.lms"
+    ]
+    files_to_delete.extend(glob.glob(f"simulations/*{tag}*.log"))
+    files_to_delete.extend(glob.glob(f"simulations/*{tag}*.data"))
+    
+    for filepath in files_to_delete:
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception:
+            pass
+
+    return out
 
 # =============================================================================
 # Genetic algorithm
@@ -892,7 +936,7 @@ if __name__ == "__main__":
                 rec.update(ok=False, cost=PENALTY)
             cache[k] = rec
             records.append(rec)
-            with open(os.path.join(PROJECT_DIR, "history.json"), "w") as f:
+            with open(HISTORY_FILE, "w") as f:
                 json.dump(records, f, indent=2)
             return rec["cost"]
 
@@ -923,18 +967,19 @@ if __name__ == "__main__":
               f"loss(-2V) = {final['loss2']:.3f} dB/cm | dneff = {final['dneff']:.3e}")
 
         # ---- save everything -----------------------------------------------------------
-        with open(os.path.join(PROJECT_DIR, "best_shape.json"), "w") as f:
+        with open("results/metrics/best_shape.json", "w") as f:
             json.dump({"doping_model": DOPING_MODEL, "p_peak_cm3": P_DOPING, "n_peak_cm3": N_DOPING,
                        "p_implants": P_IMPLANTS, "n_implants": N_IMPLANTS,
                        "grid_rows_top_to_bottom_p_is_1": best_g.astype(int).tolist(),
                        "x_edges_nm": (X_EDGES * 1e9).tolist(), "y_edges_nm": (Y_EDGES * 1e9).tolist(),
                        "metrics": final, "n_simulations": len(records)}, f, indent=2)
+                       
         plot_best_shape(best_g, f"Best evolved junction   cost = {final['cost']:.2f} V.dB",
-                        os.path.join(PROJECT_DIR, "best_shape_doping.png"),
-                        os.path.join(PROJECT_DIR, "best_shape_doping.npz"))
-        plot_gallery(records, os.path.join(PROJECT_DIR, "top_shapes.png"))
-        plot_scatter(records, final, os.path.join(PROJECT_DIR, "scatter_and_convergence.png"))
-        print(f"\nSaved results, plots and Lumerical projects in: {PROJECT_DIR}")
+                        "results/plots/best_shape_doping.png",
+                        "results/metrics/best_shape_doping.npz")
+        plot_gallery(records, "results/plots/top_shapes.png")
+        plot_scatter(records, final, "results/plots/scatter_and_convergence.png")
+        print(f"\nSaved results, plots and Lumerical projects to results/ folders!")
 
         plt.show(block=False)
         plt.pause(0.5)

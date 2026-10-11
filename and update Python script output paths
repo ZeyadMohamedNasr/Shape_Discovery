@@ -1,0 +1,35 @@
+[33mcommit 640f1814f48d4f95acfcf7b57c2bd5dda3c9260d[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: ZeyadNasr <zeyadnasr710@gmail.com>
+Date:   Sun Oct 11 03:14:16 2026 +0300
+
+    Fix README formatting
+
+[33mcommit cdfced294fca355461780e2bec676d1d26c752b9[m
+Author: ZeyadNasr <zeyadnasr710@gmail.com>
+Date:   Sun Oct 11 03:02:29 2026 +0300
+
+    Organize project folders and secure DVC remote
+
+[33mcommit 773646b2cdbb87a91b2a0d11b6537d85cb41e30c[m
+Author: ZeyadNasr <zeyadnasr710@gmail.com>
+Date:   Sun Oct 11 02:58:01 2026 +0300
+
+    Organize project folders and update Python script output paths
+
+[33mcommit 783eed25cb078901a344fe8770e9b00aedd02bdc[m
+Author: ZeyadNasr <zeyadnasr710@gmail.com>
+Date:   Sun Oct 11 00:11:16 2026 +0300
+
+    Track simulation datasets with DVC
+
+[33mcommit 0312574b342479f921e78478b3278fdfbd8fd652[m
+Author: ZeyadNasr <zeyadnasr710@gmail.com>
+Date:   Sat Oct 10 23:07:34 2026 +0300
+
+    Add initial project structure, python scripts, and gitignore
+
+[33mcommit 1ad2e803aff3e8cb16f779443f11993e50525bda[m
+Author: ZeyadNasr <zeyadnasr710@gmail.com>
+Date:   Sat Oct 10 23:06:57 2026 +0300
+
+    Configure DVC with Google Drive remote
