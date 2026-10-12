@@ -77,8 +77,8 @@ MON_Y_SPAN = 0.6e-6
 
 # Doping (cm^-3)
 CM3_TO_M3 = 1e6
-P_DOPING = 5e17
-N_DOPING = 5e17
+P_DOPING = 5e18
+N_DOPING = 5e18
 P_PLUS = 1e20
 N_PLUS = 1e20
 CONTACT_START = 1.5e-6          # |x| where p++ / n++ begin (metal sits at |x| > SLAB_WIDTH/2 - CONTACT_WIDTH)
@@ -135,7 +135,8 @@ USE_BANDWIDTH = True
 W_VPI, W_LOSS, W_BW = 5, 0.5, 1.0
 REF_BW_GHZ = 50.0
 MIN_BANDWIDTH_GHZ = 0.0
-# Caughey-Thomas mobility (300 K, cm^2/Vs): (mu_min, mu_max, N_ref [cm^-3], alpha) - used for R only
+# Caughey-Thomas mobility (300 K, cm^2/Vs): (mu_min, mu
+# _max, N_ref [cm^-3], alpha) - used for R only
 MOBILITY = {"n": (92.0, 1360.0, 1.3e17, 0.91), "p": (47.7, 495.0, 6.3e16, 0.76)}
 Q_E = 1.602176634e-19
 

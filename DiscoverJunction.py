@@ -7,7 +7,12 @@ interface can become an M, an E, a comb, a staircase, an L, ... whatever scores 
 
   every candidate:  repair (no floating p/n islands) -> merge cells into doping boxes
                     -> CHARGE @ 0 V and -2 V -> export n/p -> MODE (FDE) @ 0 V and -2 V
-  cost = Vpi*Lpi [V.cm] x loss [dB/cm]   (lower is better)
+  cost = Vpi*Lpi^W_VPI x loss^W_LOSS x (REF_BW / f3dB)^W_BW      (lower is better)
+  f3dB = 1 / (2*pi*R*C): C from the CHARGE total-charge change between 0 and -2 V, R from the slab
+  resistance between the contacts and the p/n interface (2-D resistor network of the doping map).
+
+Lateral doping is graded as in a fabricated rib: p / p+ / p++ on the left and n / n+ / n++ on the right
+(p++ / n++ under the metal, p+ / n+ in the middle of the slab, p / n next to the core).
 
 Doping: by default the p and n regions follow an ion-implant depth profile (Pearson IV, measured from
 the top silicon surface) instead of a constant value; P_DOPING / N_DOPING are the PEAK concentrations.
@@ -17,8 +22,12 @@ Seeds in the first generation: vertical, M-like, stacked, comb and W-shape (p po
 the best shapes of earlier runs (OLD_HISTORY_FILES), so the GA starts from known designs and you can
 see directly whether the evolved shape beats them.
 Lumerical stays open for the whole run (same lumapi usage as lateral_junc.py).
+
+Speed options (all in the config below): N_WORKERS (parallel Lumerical sessions), CHARGE_SWEEP (one CHARGE
+project with a 0 -> -2 V ramp, experimental, check it with check_sweep.py), SOLVER_OPTIONS.
 """
 import os
+import copy
 import json
 import time
 import importlib.util
@@ -26,14 +35,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import shutil
 import glob
-
 os.makedirs("results/plots", exist_ok=True)
 os.makedirs("results/metrics", exist_ok=True)
 os.makedirs("carriers", exist_ok=True)
 os.makedirs("simulations", exist_ok=True)
 
 # Define the unique history file for this specific script
-HISTORY_FILE = "results/metrics/history_junction.json"
+HISTORY_FILE = "results/metrics/history_bw.json"
 global_best_cost = float('inf')
 
 # =============================================================================
@@ -45,12 +53,13 @@ SIM_DIR = os.path.join(PROJECT_DIR, "simulations")
 DATA_DIR = os.path.join(PROJECT_DIR, "carriers") # Fixed to point directly to carriers
 RES_DIR = os.path.join(PROJECT_DIR, "results")
 
-SHOW_GUI = True
+SHOW_GUI = True                 # True = Lumerical windows stay open and visible
+
 # Device geometry
 CORE_WIDTH = 500e-9
 CORE_HEIGHT = 220e-9
 SLAB_HEIGHT = 90e-9
-SLAB_WIDTH = 6.0e-6
+SLAB_WIDTH = 4.4e-6
 Z_SPAN = 2.0e-6
 
 Y_BOT = -CORE_HEIGHT / 2.0
@@ -68,12 +77,16 @@ MON_Y_SPAN = 0.6e-6
 
 # Doping (cm^-3)
 CM3_TO_M3 = 1e6
-P_DOPING = 5e17
-N_DOPING = 5e17
+P_DOPING = 5e18
+N_DOPING = 5e18
 P_PLUS = 1e20
 N_PLUS = 1e20
-CONTACT_START = 1.5e-6
+CONTACT_START = 1.5e-6          # |x| where p++ / n++ begin (metal sits at |x| > SLAB_WIDTH/2 - CONTACT_WIDTH)
 CONTACT_WIDTH = 0.6e-6
+# graded slab (as fabricated):  core | p / n  |  p+ / n+  |  p++ / n++ + metal
+P_MID = 5e18                    # p+ peak concentration  (keep it well above P_DOPING)
+N_MID = 5e18                    # n+ peak concentration  (keep it well above N_DOPING)
+MID_START = 0.75e-6             # |x| where p+ / n+ begin
 
 # ---- Doping model ----------------------------------------------------------------------------
 # "pearson4": doping follows an implant depth profile measured from the local top silicon surface
@@ -101,7 +114,7 @@ NY_RIDGE = 3                    # rows between the slab top and the top of the c
 NROWS = NY_SLAB + NY_RIDGE
 
 # ---- Genetic algorithm ---------------------------------------------------------------------
-POP_SIZE = 5
+POP_SIZE = 8
 N_GENERATIONS = 6               # max simulated designs ~ POP_SIZE * (N_GENERATIONS + 1)
 N_ELITE = 2
 # Best shapes of earlier runs (e.g. a constant-doping run) are re-simulated with the current doping model
@@ -112,6 +125,34 @@ P_MUTATE_BIT = 2.0 / (NX * NROWS)   # ~2 single-cell flips per child
 P_MUTATE_BLOCK = 0.35               # chance of flipping a random rectangle (keeps shapes blocky)
 SEED = 3
 PENALTY = 1e6
+
+# ---- Objective -------------------------------------------------------------------------------
+#   cost = VpiLpi^W_VPI * loss^W_LOSS * (REF_BW_GHZ / f3dB)^W_BW     (weights = exponents)
+# Set USE_BANDWIDTH = False for the old cost (VpiLpi x loss).  MIN_BANDWIDTH_GHZ > 0 adds a steep
+# penalty to designs slower than that.  The weights can be changed later without re-simulating
+# (refine_from_history.py recomputes the cost from the stored VpiLpi, loss and f3dB).
+USE_BANDWIDTH = False           # VpiLpi-only run (speed not optimised)
+W_VPI, W_LOSS, W_BW = 5.0, 1.0, 0.0
+MAX_LOSS_DB_CM = None           # e.g. 40: soft cap, designs above it are penalised (None = ignore loss)
+REF_BW_GHZ = 50.0
+MIN_BANDWIDTH_GHZ = 0.0
+# Caughey-Thomas mobility (300 K, cm^2/Vs): (mu_min, mu
+# _max, N_ref [cm^-3], alpha) - used for R only
+MOBILITY = {"n": (92.0, 1360.0, 1.3e17, 0.91), "p": (47.7, 495.0, 6.3e16, 0.76)}
+Q_E = 1.602176634e-19
+
+# ---- Speed -------------------------------------------------------------------------------------
+# CHARGE_SWEEP: ONE CHARGE project ramps the anode 0 -> -VOLTAGE_SWING in SWEEP_POINTS steps (every step starts
+# from the previous solution) instead of two separate projects. The CHARGE sweep properties are documented, but
+# how MODE picks one bias out of the multi-bias file is NOT verified: the code looks for the property at run time,
+# checks that it has an effect and falls back to two projects otherwise.  Keep False until check_sweep.py agrees.
+CHARGE_SWEEP = False
+SWEEP_POINTS = 2
+# Extra CHARGE solver settings, applied if the property exists (otherwise skipped with a message), e.g.
+#   {"solver type": "GUMMEL", "global iteration limit": 100}      (Gummel is often better in reverse bias)
+SOLVER_OPTIONS = {}
+N_WORKERS = 1                   # > 1: parallel Lumerical sessions (each one needs a CHARGE + a MODE licence)
+MASK_SHIFT = 0.0                # m: shifts the p/n pattern against the waveguide (verify_finalists.py: +-20 nm)
 
 # Operating point / mesh
 VOLTAGE_SWING = 2.0
@@ -126,32 +167,7 @@ N_CLAD = 1.45
 
 os.makedirs(PROJECT_DIR, exist_ok=True)
 
-def get_settings():
-    """Return the current doping configuration as a dictionary."""
-    import copy
-    return {
-        "P_DOPING": P_DOPING,
-        "N_DOPING": N_DOPING,
-        "P_PLUS": P_PLUS,
-        "N_PLUS": N_PLUS,
-        "P_IMPLANTS": copy.deepcopy(P_IMPLANTS),
-        "N_IMPLANTS": copy.deepcopy(N_IMPLANTS),
-        "DOPING_MODEL": DOPING_MODEL
-    }
 
-def set_settings(s):
-    """Update the global doping configuration and rebuild the physical profiles."""
-    global P_DOPING, N_DOPING, P_PLUS, N_PLUS, P_IMPLANTS, N_IMPLANTS, DOPING_MODEL
-    
-    if "P_DOPING" in s: P_DOPING = s["P_DOPING"]
-    if "N_DOPING" in s: N_DOPING = s["N_DOPING"]
-    if "P_PLUS" in s: P_PLUS = s["P_PLUS"]
-    if "N_PLUS" in s: N_PLUS = s["N_PLUS"]
-    if "P_IMPLANTS" in s: P_IMPLANTS = s["P_IMPLANTS"]
-    if "N_IMPLANTS" in s: N_IMPLANTS = s["N_IMPLANTS"]
-    if "DOPING_MODEL" in s: DOPING_MODEL = s["DOPING_MODEL"]
-    
-    build_profiles()  # Crucial: This forces the script to recalculate the new Pearson curves
 # =============================================================================
 # Implant (Pearson IV) doping profile
 # =============================================================================
@@ -163,7 +179,7 @@ def pearson4(depth, Rp, dRp, skew, kurt=None):
     """
     if kurt is None:
         kurt = 3.0 + 2.4 * skew ** 2
-    den = 10.0 * kurt - 12.0 * skew ** 2 - 18
+    den = 10.0 * kurt - 12.0 * skew ** 2 - 18.0
     c0 = dRp ** 2 * (4.0 * kurt - 3.0 * skew ** 2) / den
     c1 = skew * dRp * (kurt + 3.0) / den
     c2 = (2.0 * kurt - 3.0 * skew ** 2 - 6.0) / den
@@ -189,8 +205,9 @@ PROFILES = {}
 
 
 def build_profiles():
-    PROFILES["p"] = make_profile(P_IMPLANTS, P_DOPING)
-    PROFILES["n"] = make_profile(N_IMPLANTS, N_DOPING)
+    """PROFILES[type](depth) -> relative profile (maximum 1); multiply by the region's peak concentration."""
+    PROFILES["p"] = make_profile(P_IMPLANTS, 1.0)
+    PROFILES["n"] = make_profile(N_IMPLANTS, 1.0)
 
 
 build_profiles()
@@ -266,37 +283,80 @@ def from_p_counts(fracs):
     return repair(g)
 
 
-SEED_SHAPES = {                                   # p fraction per row, top -> bottom
-    "vertical": [0.5, 0.5, 0.5, 0.5, 0.5],
-    "M-like":   [1.0, 0.4, 0.7, 0.4, 0.5],
-    "stacked":  [1.0, 1.0, 1.0, 0.1, 0.1],
-    "comb":     [0.3, 0.7, 0.3, 0.7, 0.3],
+
+
+
+# ---- PARENT SHAPES (templates) ---------------------------------------------------------------
+# Each template is drawn as text: 'p' / 'n', top row first, the LAST N_SLAB_ROWS_T rows are the slab rows.
+# Any size works (they are resampled onto NX x NROWS), so you can edit/add templates freely.
+# Idea behind the list: a low VpiLpi needs (i) a long p-n interface (ii) lying inside the optical mode
+# (iii) with the depletion edge able to move sideways AND vertically.  Vertical / L / U / stepped /
+# bent interfaces do that better than the plain lateral one (see literature notes in the reply).
+N_SLAB_ROWS_T = 2
+SEED_TEMPLATES = {
+    # --- basic ---------------------------------------------------------------------------------
+    "lateral":     ["pppppnnnnn"] * 5,
+    "lateral-L3":  ["pppnnnnnnn"] * 5,                       # junction pushed to the p side
+    "stacked":     ["pppppppppp"] * 3 + ["pnnnnnnnnn"] * 2,
+    "vertical":    ["pppppppppp", "pppppppppp", "ppnnnnnnnn", "ppnnnnnnnn", "ppnnnnnnnn"],
+    "comb":        ["pppnnnnnnn", "pppppppnnn", "pppnnnnnnn", "pppppppnnn", "pppnnnnnnn"],
+    "W-shape":     ["pppnnnnnnn", "pppnnpppnn", "pppnnpppnn", "pppnnpppnn", "ppppppppnn"],
+    "W-inverted": ["pppppppnnn", "ppnnnppnnn", "ppnnnppnnn", "ppnnnppnnn", "ppnnnnnnnn"],
+    # --- L / U / S family (L: 0.37 V.cm double-pass exp.; U: 0.63 V.cm sim.) ----------------------
+    "L-shape":     ["pppnnnnnnn"] * 4 + ["ppppppppnn"],
+    "L-deep":      ["ppppnnnnnn"] * 3 + ["pnnnnnnnnn"] * 2,
+    "L-inv":       ["pppnnnnnnn"] * 3 + ["pppppppnnn"] * 2,
+    "S-shape":     ["ppppppppnn", "pppnnnnnnn", "pppnnnnnnn", "ppppppppnn", "pppnnnnnnn"],
+    "U-shape":     ["pppppppnnn", "pppnnppnnn", "pppnnppnnn", "pppnnnnnnn", "pppnnnnnnn"],
+    "U-deep":      ["ppppppppnn", "pppnnnnppn", "pppnnnnppn", "pppnnnnnnn", "pppnnnnnnn"],
+    # --- stepped / bent interfaces (long interface, sinusoidal-like cross section) -----------------
+    "step-down":   ["ppppppnnnn", "pppppnnnnn", "ppppnnnnnn", "pppnnnnnnn", "ppnnnnnnnn"],
+    "step-up":     ["ppnnnnnnnn", "pppnnnnnnn", "ppppnnnnnn", "pppppnnnnn", "ppppppnnnn"],
+    "bulge":       ["pppnnnnnnn", "pppppnnnnn", "ppppppnnnn", "pppppnnnnn", "pppnnnnnnn"],
+    "cap-thin":    ["pppppppppp", "ppnnnnnnnn", "ppnnnnnnnn", "ppnnnnnnnn", "ppnnnnnnnn"],
+    "double-step": ["pppppppnnn", "pppnnnnnnn", "ppppppnnnn", "pppnnnnnnn", "pppppnnnnn"],
 }
+SEED_SHAPES = {}
+SEED_GENOMES = {}
 
 
-def w_shape_genome(x_left=2, w2=3, w1=3, h_left=2, h_right=3):
-    """W-shaped interface (all sizes in cells; rows counted from the top).
-
-      x_left : p columns left of the n tooth      w2 : width of the n tooth      (image: W2)
-      w1     : width of the p pocket right of it  (image: W1)
-      h_left : rows of p above the n tooth        (image: H-left)
-      h_right: rows the p pocket reaches down     (image: H-right)
-    """
-    g = np.zeros((NROWS, NX), dtype=bool)
-    g[:, :x_left] = True                                       # left wall, p all the way down
-    g[:h_left, x_left:x_left + w2] = True                      # p cap above the n tooth
-    g[:h_right, x_left + w2:x_left + w2 + w1] = True           # p pocket beside the tooth
-    return repair(g)
-
-
-SEED_GENOMES = {"W-shape": w_shape_genome()}                   # shapes a row-count cannot describe
+def from_template(rows, n_slab_rows=None):
+    """Resample a text template onto the current NX x NROWS grid (ridge rows and slab rows kept apart)."""
+    n_slab_rows = N_SLAB_ROWS_T if n_slab_rows is None else n_slab_rows
+    t = np.array([[ch == "p" for ch in row] for row in rows])
+    nt = t.shape[0] - n_slab_rows
+    pick = lambda n_new, n_old, off: off + np.minimum(((np.arange(n_new) + 0.5) * n_old / n_new).astype(int), n_old - 1)
+    ri = np.concatenate([pick(NROWS - NY_SLAB, nt, 0), pick(NY_SLAB, n_slab_rows, nt)])
+    ci = np.minimum(((np.arange(NX) + 0.5) * t.shape[1] / NX).astype(int), t.shape[1] - 1)
+    return repair(t[np.ix_(ri, ci)])
 
 
 def all_seeds():
-    seeds = {name: from_p_counts(fr) for name, fr in SEED_SHAPES.items()}
+    seeds = {name: from_template(rows) for name, rows in SEED_TEMPLATES.items()}
+    seeds.update({name: from_p_counts(fr) for name, fr in SEED_SHAPES.items()})
     seeds.update(SEED_GENOMES)
     return seeds
+SHOW_PARENTS_FIRST = True       # draw all parents at start; close the window to continue
+PREVIEW_ONLY = False            # True = only draw the parents and exit (no Lumerical)
 
+def show_parents():
+    seeds = all_seeds()
+    n_col = 4
+    n_row = int(np.ceil(len(seeds) / n_col))
+    fig, axs = plt.subplots(n_row, n_col, figsize=(3.2 * n_col, 2.2 * n_row), squeeze=False)
+    cmap = plt.matplotlib.colors.ListedColormap(["#e05a47", "#3b78d8"])   # n red, p blue
+    for ax, (name, g) in zip(axs.flat, seeds.items()):
+        ax.imshow(g, cmap=cmap, vmin=0, vmax=1, aspect="equal")
+        ax.set_xticks(np.arange(-0.5, NX), minor=True)
+        ax.set_yticks(np.arange(-0.5, NROWS), minor=True)
+        ax.grid(which="minor", color="w", lw=1)
+        ax.axhline(NROWS - NY_SLAB - 0.5, color="k", ls="--", lw=0.8)    # slab top
+        ax.set_title(name, fontsize=9)
+        ax.set_xticks([]); ax.set_yticks([])
+    for ax in list(axs.flat)[len(seeds):]:
+        ax.axis("off")
+    fig.tight_layout()
+    plt.show()
 
 def load_old_seeds(files, n):
     """Best n shapes of earlier history files -> [(genome, label)] (re-simulated with the current model)."""
@@ -315,11 +375,15 @@ def grid_to_boxes(g):
     """Merge horizontal runs of equal type into doping boxes (non-overlapping)."""
     W2, CS = SLAB_WIDTH / 2.0, CONTACT_START
     yb, yt = Y_BOT - M, Y_TOP + M
+    if not (HC < MID_START < CS < W2):
+        raise ValueError("Need CORE_WIDTH/2 < MID_START < CONTACT_START < SLAB_WIDTH/2")
     boxes = [
         ("p_plus", "p", P_PLUS, -W2 - M, -CS, yb, Y_SLAB + M),
         ("n_plus", "n", N_PLUS, CS, W2 + M, yb, Y_SLAB + M),
-        ("p_out", "p", P_DOPING, -CS, -HC, yb, Y_SLAB + M),      # slab left of the core
-        ("n_out", "n", N_DOPING, HC, CS, yb, Y_SLAB + M),        # slab right of the core
+        ("p_mid", "p", P_MID, -CS, -MID_START, yb, Y_SLAB + M),   # p+ / n+ in the middle of the slab
+        ("n_mid", "n", N_MID, MID_START, CS, yb, Y_SLAB + M),
+        ("p_out", "p", P_DOPING, -MID_START, -HC, yb, Y_SLAB + M),   # p / n next to the core
+        ("n_out", "n", N_DOPING, HC, MID_START, yb, Y_SLAB + M),
     ]
     for r in range(NROWS):
         ylo, yhi = ROW_Y[r]
@@ -333,8 +397,11 @@ def grid_to_boxes(g):
             while c2 + 1 < NX and g[r, c2 + 1] == g[r, c]:
                 c2 += 1
             is_p = bool(g[r, c])
-            boxes.append((f"{'p' if is_p else 'n'}_r{r}_c{c}", "p" if is_p else "n",
-                          P_DOPING if is_p else N_DOPING, X_EDGES[c], X_EDGES[c2 + 1], ylo, yhi))
+            xa = -HC if c == 0 else min(max(X_EDGES[c] + MASK_SHIFT, -HC), HC)           # pattern shifted by MASK_SHIFT,
+            xb = HC if c2 == NX - 1 else min(max(X_EDGES[c2 + 1] + MASK_SHIFT, -HC), HC)  # outer edges stay at the core edge
+            if xb - xa > 1e-12:
+                boxes.append((f"{'p' if is_p else 'n'}_r{r}_c{c}", "p" if is_p else "n",
+                              P_DOPING if is_p else N_DOPING, xa, xb, ylo, yhi))
             c = c2 + 1
     return apply_doping_model(boxes)
 
@@ -349,7 +416,7 @@ def apply_doping_model(boxes):
         if name.endswith("_plus"):
             out.append((name, dtype, conc, x0, x1, y0, y1))
             continue
-        top = Y_SLAB if name.endswith("_out") else Y_TOP       # implant enters from the local top surface
+        top = Y_SLAB if name.endswith(("_out", "_mid")) else Y_TOP   # implant enters from the local top surface
         segs = []
         if y0 < Y_BOT:                                          # overshoot below the silicon
             segs.append((y0, min(Y_BOT, y1)))
@@ -361,8 +428,177 @@ def apply_doping_model(boxes):
             segs.append((max(y0, top), y1))
         for k, (a, b) in enumerate(segs):
             depth = np.clip(top - 0.5 * (a + b), 0.0, top - Y_BOT)
-            out.append((f"{name}_s{k}", dtype, max(float(PROFILES[dtype](depth)), 1e14), x0, x1, a, b))
+            out.append((f"{name}_s{k}", dtype, max(float(conc * PROFILES[dtype](depth)), 1e14), x0, x1, a, b))
     return out
+
+
+# =============================================================================
+# Objective, bookkeeping, series resistance, junction dimensions
+# =============================================================================
+class CapacitanceError(RuntimeError):
+    pass
+
+
+class SweepUnsupported(RuntimeError):
+    pass
+
+
+def cost_function(vpilpi, loss, f3db_ghz=None):
+    c = vpilpi ** W_VPI * abs(loss) ** W_LOSS
+    if MAX_LOSS_DB_CM is not None and abs(loss) > MAX_LOSS_DB_CM:
+        c *= (abs(loss) / MAX_LOSS_DB_CM) ** 3
+    if USE_BANDWIDTH:
+        if f3db_ghz is None or not np.isfinite(f3db_ghz) or f3db_ghz <= 0:
+            return float("inf")
+        c *= (REF_BW_GHZ / f3db_ghz) ** W_BW
+        if f3db_ghz < MIN_BANDWIDTH_GHZ:
+            c *= (MIN_BANDWIDTH_GHZ / f3db_ghz) ** 3
+    return c
+
+
+def setup_tag():
+    """Short id of everything that changes the physics. Results are only comparable within one tag."""
+    import hashlib
+    keys = dict(model=DOPING_MODEL, p=P_DOPING, n=N_DOPING, pm=P_MID, nm=N_MID, pp=P_PLUS, nn=N_PLUS,
+                mid=MID_START, cs=CONTACT_START, pi=P_IMPLANTS, ni=N_IMPLANTS, slice=SLICE,
+                grid=(NX, NY_SLAB, NY_RIDGE), v=VOLTAGE_SWING, lam=LAMBDA, mj=MESH_JUNCTION, fm=FDE_MESH)
+    return f"{DOPING_MODEL}-" + hashlib.md5(json.dumps(keys, sort_keys=True, default=str).encode()).hexdigest()[:8]
+
+
+def mobility(dtype, n_cm3):
+    mn, mx, nref, a = MOBILITY[dtype]
+    return mn + (mx - mn) / (1.0 + (n_cm3 / nref) ** a)
+
+
+def series_resistance(boxes, dx=10e-9, dy=10e-9):
+    """Series resistance per unit waveguide length [ohm.m] = R_p + R_n.
+
+    Each side is a 2-D resistor network on the doping map (majority-carrier conductivity with
+    doping-dependent mobility): 1 V at the silicon under the metal, 0 V at the p/n interface.
+    For a modulator of length L the resistance is R'/L.
+    """
+    from scipy.sparse import coo_matrix, eye
+    from scipy.sparse.linalg import spsolve
+    W2 = SLAB_WIDTH / 2.0
+    xs = np.arange(-W2 + dx / 2, W2, dx)
+    ys = np.arange(Y_BOT + dy / 2, Y_TOP, dy)
+    X, Y = np.meshgrid(xs, ys)
+    net = np.zeros_like(X)
+    for _, dtype, conc, x0, x1, y0, y1 in boxes:
+        m = (X >= x0) & (X < x1) & (Y >= y0) & (Y < y1)
+        net[m] += conc if dtype == "p" else -conc
+    si = (np.abs(X) <= HC) | (Y <= Y_SLAB)
+    total = 0.0
+    for t in ("p", "n"):
+        mask = si & ((net > 0) if t == "p" else (net < 0))
+        other = si & ((net < 0) if t == "p" else (net > 0))
+        n_abs = np.maximum(np.abs(net), 1.0)
+        sig = np.where(mask, Q_E * mobility(t, n_abs) * n_abs * 100.0, 0.0)          # S/m
+        nb = np.zeros_like(mask)
+        nb[:, 1:] |= other[:, :-1]
+        nb[:, :-1] |= other[:, 1:]
+        nb[1:, :] |= other[:-1, :]
+        nb[:-1, :] |= other[1:, :]
+        iface = mask & nb
+        side = (X < 0) if t == "p" else (X > 0)
+        contact = mask & side & (np.abs(X) >= W2 - CONTACT_WIDTH) & (Y >= Y_SLAB - dy)
+        if not iface.any() or not contact.any():
+            return float("inf")
+        idx = -np.ones(mask.shape, dtype=int)
+        idx[mask] = np.arange(mask.sum())
+        rows, cols, vals = [], [], []
+        for horiz in (True, False):                          # edges to the right / edges below
+            if horiz:
+                m1, ia, ib = mask[:, :-1] & mask[:, 1:], idx[:, :-1], idx[:, 1:]
+                sa, sb, geom = sig[:, :-1], sig[:, 1:], dy / dx
+            else:
+                m1, ia, ib = mask[:-1, :] & mask[1:, :], idx[:-1, :], idx[1:, :]
+                sa, sb, geom = sig[:-1, :], sig[1:, :], dx / dy
+            i, j, s1, s2 = ia[m1], ib[m1], sa[m1], sb[m1]
+            gg = 2.0 * s1 * s2 / (s1 + s2) * geom             # harmonic mean conductance of the edge
+            rows += [i, j, i, j]
+            cols += [i, j, j, i]
+            vals += [gg, gg, -gg, -gg]
+        n_nodes = int(mask.sum())
+        L = coo_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+                       shape=(n_nodes, n_nodes)).tocsr()
+        phi = np.zeros(n_nodes)
+        fixed = np.zeros(n_nodes, dtype=bool)
+        c_idx, f_idx = idx[contact], idx[iface]
+        phi[c_idx] = 1.0
+        fixed[c_idx] = True
+        fixed[f_idx] = True
+        free = ~fixed
+        if free.any():
+            A = L[free][:, free] + 1e-9 * eye(int(free.sum()))
+            rhs = -L[free][:, fixed] @ phi[fixed]
+            phi[free] = spsolve(A.tocsc(), rhs)
+        current = float((L @ phi)[c_idx].sum())                                     # A per metre at 1 V
+        if not np.isfinite(current) or current <= 0:
+            return float("inf")
+        total += 1.0 / current
+    return total
+
+
+def describe_shape(g):
+    """Dimensions of the p/n interface in nm: every wall (H) and step (W), plus summary numbers."""
+    xe, ye = X_EDGES * 1e9, Y_EDGES * 1e9
+    top_nm = Y_TOP * 1e9
+    segs = []
+
+    def side_type(r, c):                                    # cell type, or the outer slab outside the grid
+        if 0 <= c < NX:
+            return bool(g[r, c])
+        return (c < 0) if r in SLAB_ROWS else None          # left of the core = p, right = n (slab rows only)
+
+    for c in range(NX + 1):                                 # vertical walls between column c-1 and c
+        rows = [r for r in range(NROWS)
+                if side_type(r, c - 1) is not None and side_type(r, c) is not None
+                and side_type(r, c - 1) != side_type(r, c)]
+        for grp in _consecutive(rows):
+            y_top, y_bot = ROW_Y[grp[0]][1] * 1e9, ROW_Y[grp[-1]][0] * 1e9
+            segs.append(dict(kind="vertical wall (H)", x_nm=xe[c], y_top_nm=y_top, y_bottom_nm=y_bot,
+                             length_nm=y_top - y_bot, depth_top_nm=top_nm - y_top, depth_bottom_nm=top_nm - y_bot))
+    for r in range(1, NROWS):                               # horizontal steps between row r-1 (above) and r
+        cols = [c for c in range(NX) if g[r - 1, c] != g[r, c]]
+        for grp in _consecutive(cols):
+            y = ROW_Y[r][1] * 1e9
+            segs.append(dict(kind="horizontal step (W)", y_nm=y, x_from_nm=xe[grp[0]], x_to_nm=xe[grp[-1] + 1],
+                             length_nm=xe[grp[-1] + 1] - xe[grp[0]], depth_nm=top_nm - y))
+    hs = [s_["length_nm"] for s_ in segs if s_["kind"].startswith("horizontal")]
+    vs = [s_["length_nm"] for s_ in segs if s_["kind"].startswith("vertical")]
+    return dict(segments=segs,
+                summary=dict(interface_length_nm=sum(hs) + sum(vs), n_segments=len(segs),
+                             widest_step_W_nm=max(hs) if hs else 0.0, tallest_wall_H_nm=max(vs) if vs else 0.0,
+                             smallest_feature_nm=min(hs + vs) if segs else 0.0,
+                             cell_width_nm=float(xe[1] - xe[0]),
+                             cell_heights_nm=[float(ye[i + 1] - ye[i]) for i in range(NROWS)][::-1]))
+
+
+def _consecutive(idx):
+    out = []
+    for i in idx:
+        if out and i == out[-1][-1] + 1:
+            out[-1].append(i)
+        else:
+            out.append([i])
+    return out
+
+
+def report_dimensions(g, json_path=None):
+    d = describe_shape(g)
+    print("\nJunction dimensions (nm; depth = distance below the top of the ridge):")
+    for s_ in sorted(d["segments"], key=lambda s_: (s_["kind"], s_.get("x_nm", s_.get("x_from_nm")))):
+        if s_["kind"].startswith("vertical"):
+            print(f"   H wall  x = {s_['x_nm']:7.1f}   depth {s_['depth_top_nm']:6.1f} -> {s_['depth_bottom_nm']:6.1f}"
+                  f"   H = {s_['length_nm']:6.1f}")
+        else:
+            print(f"   W step  depth = {s_['depth_nm']:6.1f}   x {s_['x_from_nm']:7.1f} -> {s_['x_to_nm']:7.1f}"
+                  f"   W = {s_['length_nm']:6.1f}")
+    print("   summary:", ", ".join(f"{k}={v:.1f}" for k, v in d["summary"].items() if not isinstance(v, list)))
+    if json_path:
+        json.dump(d, open(json_path, "w"), indent=2)
+    return d
 
 
 # =============================================================================
@@ -472,8 +708,21 @@ def configure_solver(charge):
 
 
 
-def run_charge(charge, boxes, voltage, tag):
-    print(f"  -> CHARGE  V={voltage:+.1f} V  ({len(boxes)} doping boxes)")
+def apply_solver_options(charge):
+    for name, val in SOLVER_OPTIONS.items():
+        try:
+            charge.select("CHARGE")
+            charge.set(name, val)
+        except Exception as e:
+            print(f"     [solver] could not set '{name}' = {val!r}: {e}")
+
+
+def run_charge(charge, boxes, volts, tag):
+    sweep = not np.isscalar(volts)
+    volts = np.atleast_1d(np.asarray(volts, dtype=float))
+    vtag = "sweep" if sweep else f"{abs(volts[0]):.1f}V"
+    what = f"sweep {volts[0]:+.1f} -> {volts[-1]:+.1f} V ({len(volts)} points)" if sweep else f"V={volts[0]:+.1f} V"
+    print(f"  -> CHARGE  {what}  ({len(boxes)} doping boxes)")
     t0 = time.time()
     charge.eval("newproject;")
 
@@ -511,14 +760,24 @@ def run_charge(charge, boxes, voltage, tag):
     add_rect(charge, "Cathode_Metal", "Metal_Electrical", mx0, mx1, Y_SLAB, Y_SLAB + 100e-9, 1)
 
     configure_solver(charge)
+    apply_solver_options(charge)
 
     # Contacts (anode = p side)
     charge.addelectricalcontact()
     charge.set("name", "anode")
     charge.set("surface type", "solid")
     charge.set("solid", "Anode_Metal")
-    charge.set("sweep type", "single")
-    charge.set("voltage", float(voltage))
+    if sweep:
+        try:
+            charge.set("sweep type", "range")
+            charge.set("range start", float(volts[0]))
+            charge.set("range stop", float(volts[-1]))
+            charge.set("range num points", int(len(volts)))
+        except Exception as e:
+            raise SweepUnsupported(f"cannot set the anode sweep properties ({e})")
+    else:
+        charge.set("sweep type", "single")
+        charge.set("voltage", float(volts[0]))
 
     charge.addelectricalcontact()
     charge.set("name", "cathode")
@@ -527,12 +786,12 @@ def run_charge(charge, boxes, voltage, tag):
     charge.set("sweep type", "single")
     charge.set("voltage", 0.0)
 
-    # Doping boxes of the candidate shape
+    # Doping boxes
     for name, dtype, conc, x0, x1, y0, y1 in boxes:
         add_doping(charge, name, dtype, conc, x0, x1, y0, y1)
 
-    # Export monitor
-    mat_path = os.path.join(DATA_DIR, f"carriers_{tag}_{abs(voltage):.1f}V.mat").replace("\\", "/")
+    # EXPORT MONITOR (To save .mat file for MODE optical simulation)
+    mat_path = os.path.join(DATA_DIR, f"carriers_{tag}_{vtag}.mat").replace("\\", "/")
     if os.path.exists(mat_path):
         try:
             os.remove(mat_path)
@@ -549,12 +808,26 @@ def run_charge(charge, boxes, voltage, tag):
     charge.set("save data", True)
     charge.set("filename", mat_path)
 
-    save_path = os.path.join(SIM_DIR, f"S_{tag}_{abs(voltage):.1f}V.ldev").replace("\\", "/")
+    # BW MONITOR (Hidden monitor just to extract capacitance without file-locking crashes)
+    if USE_BANDWIDTH:
+        charge.addchargemonitor()
+        charge.set("name", "charge_bw")
+        try_set(charge, ("monitor type", "geometry type"), "2D Z-normal", required=False)
+        charge.set("x", 0.0)
+        charge.set("x span", MON_X_SPAN)
+        charge.set("y", 0.0)
+        charge.set("y span", MON_Y_SPAN)
+        charge.set("save data", False)
+        # CRITICAL FIX: Tell Lumerical to actually calculate 'total_charge'
+        try_set(charge, "integrate total charge", True, required=False)
+
+    save_path = os.path.join(SIM_DIR, f"S_{tag}_{vtag}.ldev").replace("\\", "/")
+
     charge.save(save_path)
     t_start = time.time()
     charge.run()
 
-    # wait for a FRESH export (guards against a stale file from a previous run)
+    # Wait for file export to complete securely
     for _ in range(80):
         if (os.path.exists(mat_path) and os.path.getsize(mat_path) > 1000
                 and os.path.getmtime(mat_path) >= t_start - 1.0):
@@ -563,10 +836,26 @@ def run_charge(charge, boxes, voltage, tag):
     else:
         raise RuntimeError("CHARGE did not export a fresh .mat file (did it converge?)")
     time.sleep(0.3)
+
+    # Extract Capacitance using the dedicated memory-safe monitor
+    q = None
+    if USE_BANDWIDTH:
+        try:
+            try:
+                Q = charge.getresult("charge_bw", "total_charge")
+            except Exception:
+                Q = charge.getresult("CHARGE::charge_bw", "total_charge")
+            n = np.atleast_1d(np.squeeze(Q["n"])).astype(float)
+            p = np.atleast_1d(np.squeeze(Q["p"])).astype(float)
+            vk = next((k for k in Q if str(k).lower() == "v_anode"), None)
+            v = np.atleast_1d(np.squeeze(Q[vk])).astype(float) if vk else volts
+            q = (v, n, p)
+        except Exception as e:
+            raise CapacitanceError(
+                f"Could not read total_charge from the monitor 'charge_bw' ({e}). "
+                "Set USE_BANDWIDTH = False to run without the bandwidth term.")
     print(f"     CHARGE done in {time.time() - t0:.0f} s")
-    return mat_path
-
-
+    return mat_path, q
 # =============================================================================
 # MODE (FDE)
 # =============================================================================
@@ -630,6 +919,13 @@ def solve_te_modes(mode):
     return [r for r in rows if r["te"] > 0.5 and r["neff"].real > N_CLAD]
 
 
+def _fde_metrics(a, b):
+    dn = abs(b["neff"].real - a["neff"].real)
+    vpilpi = (LAMBDA / (2.0 * dn)) * VOLTAGE_SWING * 100.0 if dn > 1e-12 else float("inf")   # V.cm
+    return {"neff0": a["neff"].real, "dneff": dn, "vpilpi": vpilpi,
+            "loss0": a["loss"], "loss2": b["loss"], "avg_loss": 0.5 * (a["loss"] + b["loss"])}
+
+
 def run_fde(mode, mat_0v, mat_2v, tag):
     found = {}
     for label, mat_file in (("0V", mat_0v), ("-2V", mat_2v)):
@@ -641,37 +937,108 @@ def run_fde(mode, mat_0v, mat_2v, tag):
             raise RuntimeError(f"No guided TE mode at {label}")
         found[label] = modes[0]                      # fundamental TE
         mode.save(os.path.join(SIM_DIR, f"S_{tag}_optical_{label}.lms"))
+    return _fde_metrics(found["0V"], found["-2V"])
 
-    a, b = found["0V"], found["-2V"]
-    dn = abs(b["neff"].real - a["neff"].real)
-    vpilpi = (LAMBDA / (2.0 * dn)) * VOLTAGE_SWING * 100.0 if dn > 1e-12 else float("inf")   # V.cm
-    return {"neff0": a["neff"].real, "dneff": dn, "vpilpi": vpilpi,
-            "loss0": a["loss"], "loss2": b["loss"], "avg_loss": 0.5 * (a["loss"] + b["loss"])}
 
+def find_bias_index_property(mode, obj="np density"):
+    """Name of the property of the imported np density object that selects the bias point (EXPERIMENTAL)."""
+    try:
+        names = mode.getnamed(obj)
+    except Exception as e:
+        raise SweepUnsupported(f"cannot list the properties of '{obj}' ({e})")
+    if isinstance(names, str):
+        names = names.replace(",", " ").split()
+    names = [str(n) for n in np.atleast_1d(names)]
+    cands = [n for n in names if "index" in n.lower() and n.lower().startswith("v")]
+    cands = cands or [n for n in names if "index" in n.lower() and "bias" in n.lower()]
+    if not cands:
+        raise SweepUnsupported(f"no bias-index property found among {names}")
+    return cands[0]
+
+
+def run_fde_sweep(mode, mat_file, i0, i2, tag):
+    """One MODE project, one multi-bias import; bias points picked by 1-based index. EXPERIMENTAL."""
+    setup_fde_waveguide(mode)
+    mode.select("np density")
+    mode.importdataset(mat_file)
+    prop = find_bias_index_property(mode)
+    found = {}
+    for label, idx in (("0V", i0), ("-2V", i2)):
+        try:
+            mode.switchtolayout()
+            mode.setnamed("np density", prop, float(idx))
+        except Exception as e:
+            raise SweepUnsupported(f"cannot set '{prop}' on the np density object ({e})")
+        modes = solve_te_modes(mode)
+        if not modes:
+            raise RuntimeError(f"No guided TE mode at {label}")
+        found[label] = modes[0]
+    mode.save(os.path.join(PROJECT_DIR, f"S_{tag}_optical_sweep.lms"))
+    if abs(found["0V"]["neff"].real - found["-2V"]["neff"].real) < 1e-12:
+        raise SweepUnsupported(f"setting '{prop}' did not change the mode (not the bias selector)")
+    return _fde_metrics(found["0V"], found["-2V"])
+
+
+def _bandwidth(boxes, q0, q2):
+    """C from the change of total charge between the two biases, R from the doping map -> f3dB."""
+    (n0, p0), (n2, p2) = q0, q2
+    c_per_m = 0.5 * Q_E * (abs(n2 - n0) + abs(p2 - p0)) / VOLTAGE_SWING          # F/m (secant 0 .. -2 V)
+    r_ohm_m = series_resistance(boxes)                                            # ohm.m
+    rc = r_ohm_m * c_per_m                                                        # s
+    f3db = 1.0 / (2.0 * np.pi * rc) / 1e9 if np.isfinite(rc) and rc > 0 else 0.0
+    out = dict(C_pF_per_mm=c_per_m * 1e9, R_ohm_mm=r_ohm_m * 1e3, f3db_ghz=float(f3db))
+    print(f"     C = {out['C_pF_per_mm']:.3f} pF/mm   R = {out['R_ohm_mm']:.2f} ohm.mm   f3dB(RC) = {f3db:.1f} GHz")
+    return out
+
+
+SWEEP_STATE = {"broken": False, "reason": ""}
 
 
 def evaluate(charge, mode, g, tag):
     boxes = grid_to_boxes(g)
-    mat_0v = run_charge(charge, boxes, 0.0, tag)
-    mat_2v = run_charge(charge, boxes, -VOLTAGE_SWING, tag)
-    print("  -> MODE (FDE)")
-    out = run_fde(mode, mat_0v, mat_2v, tag)
+    out = None
+    if CHARGE_SWEEP and not SWEEP_STATE["broken"]:
+        try:
+            volts = np.linspace(0.0, -VOLTAGE_SWING, SWEEP_POINTS)
+            mat, q = run_charge(charge, boxes, volts, tag)
+            if q is not None:
+                i0 = int(np.argmin(np.abs(q[0] - 0.0)))
+                i2 = int(np.argmin(np.abs(q[0] + VOLTAGE_SWING)))
+            else:
+                i0, i2 = 0, len(volts) - 1
+            print("  -> MODE (FDE, one multi-bias import)")
+            fde = run_fde_sweep(mode, mat, i0 + 1, i2 + 1, tag)
+            out = {}
+            if USE_BANDWIDTH:
+                out.update(_bandwidth(boxes, (q[1][i0], q[2][i0]), (q[1][i2], q[2][i2])))
+            out.update(fde)
+        except SweepUnsupported as e:
+            SWEEP_STATE.update(broken=True, reason=str(e))
+            print(f"  [sweep] not usable ({e}) -> two separate CHARGE projects from now on")
+            out = None
+    if out is None:
+        mat_0v, q0 = run_charge(charge, boxes, 0.0, tag)
+        mat_2v, q2 = run_charge(charge, boxes, -VOLTAGE_SWING, tag)
+        out = {}
+        if USE_BANDWIDTH:
+            out.update(_bandwidth(boxes, (q0[1][0], q0[2][0]), (q2[1][0], q2[2][0])))
+        print("  -> MODE (FDE)")
+        out.update(run_fde(mode, mat_0v, mat_2v, tag))
 
     # === SAVE BEST RUN & AUTO-CLEANUP LOGIC ===
     global global_best_cost
     if out is not None and "vpilpi" in out and "avg_loss" in out:
-        # For this script, cost = VpiLpi * abs(loss)
-        current_run_score = out["vpilpi"] * abs(out["avg_loss"])
+        current_run_score = cost_function(out["vpilpi"], out["avg_loss"], out.get("f3db_ghz"))
         
         # 1. Protect the best run
         if current_run_score < global_best_cost:
             global_best_cost = current_run_score
             print(f"\n*** NEW BEST SHAPE FOUND (Score: {current_run_score:.3f})! Saving files... ***")
             best_files = [
-                (f"simulations/S_{tag}_0.0V.ldev", "simulations/BEST_JUNCTION_0.0V.ldev"),
-                (f"simulations/S_{tag}_2.0V.ldev", "simulations/BEST_JUNCTION_2.0V.ldev"),
-                (f"simulations/S_{tag}_optical_0V.lms", "simulations/BEST_JUNCTION_optical_0V.lms"),
-                (f"simulations/S_{tag}_optical_-2V.lms", "simulations/BEST_JUNCTION_optical_-2V.lms")
+                (f"simulations/S_{tag}_0.0V.ldev", "simulations/BEST_BW_0.0V.ldev"),
+                (f"simulations/S_{tag}_2.0V.ldev", "simulations/BEST_BW_2.0V.ldev"),
+                (f"simulations/S_{tag}_optical_0V.lms", "simulations/BEST_BW_optical_0V.lms"),
+                (f"simulations/S_{tag}_optical_-2V.lms", "simulations/BEST_BW_optical_-2V.lms")
             ]
             for src, dest in best_files:
                 if os.path.exists(src):
@@ -680,7 +1047,8 @@ def evaluate(charge, mode, g, tag):
     # 2. Delete the heavy temporary files
     files_to_delete = [
         f"simulations/S_{tag}_0.0V.ldev", f"simulations/S_{tag}_2.0V.ldev",
-        f"simulations/S_{tag}_optical_0V.lms", f"simulations/S_{tag}_optical_-2V.lms"
+        f"simulations/S_{tag}_optical_0V.lms", f"simulations/S_{tag}_optical_-2V.lms",
+        f"simulations/S_{tag}_optical_sweep.lms"
     ]
     files_to_delete.extend(glob.glob(f"simulations/*{tag}*.log"))
     files_to_delete.extend(glob.glob(f"simulations/*{tag}*.data"))
@@ -693,6 +1061,151 @@ def evaluate(charge, mode, g, tag):
             pass
 
     return out
+
+
+# =============================================================================
+# Running many shapes: one after the other, or in parallel worker processes
+# =============================================================================
+_SETTINGS_KEYS = ("DOPING_MODEL", "P_DOPING", "N_DOPING", "P_MID", "N_MID", "P_IMPLANTS", "N_IMPLANTS", "SLICE",
+                  "MASK_SHIFT", "MESH_JUNCTION", "MESH_OPTICAL", "FDE_MESH", "LAMBDA", "VOLTAGE_SWING",
+                  "USE_BANDWIDTH", "CHARGE_SWEEP", "SWEEP_POINTS", "SOLVER_OPTIONS",
+                  "W_VPI", "W_LOSS", "W_BW", "REF_BW_GHZ", "MIN_BANDWIDTH_GHZ")
+_W = {}                                                    # per-worker Lumerical sessions
+
+
+def get_settings():
+    return {k: globals()[k] for k in _SETTINGS_KEYS}
+
+
+def apply_settings(d):
+    globals().update(d)
+    build_profiles()
+
+
+def settings_tag(st):
+    base = copy.deepcopy(get_settings())
+    apply_settings(st)
+    try:
+        return setup_tag()
+    finally:
+        apply_settings(base)
+
+
+def _worker_close():
+    for app in (_W.get("charge"), _W.get("mode")):
+        try:
+            app.close()
+        except Exception:
+            pass
+
+
+def _worker_init(settings, project_dir):
+    global PROJECT_DIR
+    PROJECT_DIR = project_dir
+    apply_settings(settings)
+    lum = get_lumapi()
+    _W["charge"] = lum.DEVICE(hide=True)
+    _W["mode"] = lum.MODE(hide=True)
+    import atexit
+    atexit.register(_worker_close)
+
+
+def _outcome(fn, *args):
+    t0 = time.time()
+    try:
+        return dict(ok=True, metrics=fn(*args), seconds=time.time() - t0)
+    except CapacitanceError as e:
+        return dict(ok=False, fatal=True, error=str(e), seconds=time.time() - t0)
+    except Exception as e:
+        return dict(ok=False, fatal=False, error=str(e), seconds=time.time() - t0)
+
+
+def _worker_task(args):
+    grid_list, settings = args
+    apply_settings(settings)
+    return _outcome(evaluate, _W["charge"], _W["mode"], np.array(grid_list, dtype=bool), f"eval_w{os.getpid()}")
+
+
+def make_pool(n_workers=None, start_method="spawn"):
+    """Pool of worker processes, each with its own hidden CHARGE + MODE session. None if n_workers <= 1."""
+    n = N_WORKERS if n_workers is None else n_workers
+    if n <= 1:
+        return None
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    return ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context(start_method),
+                               initializer=_worker_init, initargs=(get_settings(), PROJECT_DIR))
+
+
+def run_tasks(tasks, pool, apps, headers=None):
+    """tasks: [(genome, settings_dict)] -> [outcome dict] in the same order.
+    outcome = {ok, metrics | error, fatal?, seconds}.  pool=None runs them one after the other on `apps`."""
+    headers = headers or [""] * len(tasks)
+    outs = []
+    if pool is None:
+        base = copy.deepcopy(get_settings())
+        try:
+            for (g, st), head in zip(tasks, headers):
+                if head:
+                    print(head)
+                apply_settings(st)
+                o = _outcome(evaluate, apps[0], apps[1], g, "eval")
+                outs.append(o)
+                if o.get("fatal"):
+                    break
+        finally:
+            apply_settings(base)
+    else:
+        for head in headers:
+            if head:
+                print(head)
+        futs = [pool.submit(_worker_task, (g.astype(int).tolist(), st)) for g, st in tasks]
+        outs = [f.result() for f in futs]
+    for o in outs:
+        if o.get("fatal"):
+            raise CapacitanceError(o["error"])
+    return outs
+
+
+def _ascii(g):
+    return "\n".join("     " + "".join("p" if v else "n" for v in row) for row in g)
+
+
+def run_candidates(items, cache, records, pool, apps, history_path):
+    """items: [(genome, label, gen)].  Shapes not simulated yet are run (in parallel if `pool`), one record each
+    is appended to `records` / `cache`, the history file is rewritten.  Returns the costs in item order."""
+    new, seen = [], set()
+    for g, label, gen in items:
+        k = key_of(g)
+        if k not in cache and k not in seen:
+            seen.add(k)
+            new.append((g, label, gen))
+    if new:
+        base = get_settings()
+        heads = [f"\n=== Simulation {len(records) + i + 1} (gen {gen}) {label} ===\n{_ascii(g)}"
+                 for i, (g, label, gen) in enumerate(new)]
+        outs = run_tasks([(g, base) for g, _, _ in new], pool, apps, heads)
+        tag = setup_tag()
+        for (g, label, gen), o in zip(new, outs):
+            rec = {"grid": g.astype(int).tolist(), "label": label, "gen": gen, "doping": DOPING_MODEL,
+                   "setup": tag, "time_s": o["seconds"]}
+            if o["ok"]:
+                r = o["metrics"]
+                cost = cost_function(r["vpilpi"], r["avg_loss"], r.get("f3db_ghz"))
+                ok = bool(np.isfinite(cost))
+                rec.update(r, ok=ok, cost=float(cost) if ok else PENALTY)
+                bw = f"   f3dB = {r['f3db_ghz']:.1f} GHz" if "f3db_ghz" in r else ""
+                print(f"  RESULT [{label or 'shape'}]  Vpi*Lpi = {r['vpilpi']:.3f} V.cm   loss = {r['avg_loss']:.3f} "
+                      f"dB/cm{bw}   cost = {rec['cost']:.3f}   ({o['seconds'] / 60:.1f} min)")
+            else:
+                print(f"  FAILED [{label or 'shape'}]: {o['error']}")
+                rec.update(ok=False, cost=PENALTY, error=o["error"])
+            cache[key_of(g)] = rec
+            records.append(rec)
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(records, f, indent=2)
+    return [cache[key_of(g)]["cost"] for g, _, _ in items]
+
 
 # =============================================================================
 # Genetic algorithm
@@ -729,8 +1242,9 @@ def tournament(pop, fit, rng, k=3):
     return pop[idx[np.argmin([fit[i] for i in idx])]]
 
 
-def run_ga(fitness, cache, rng, extra_seeds=()):
-    """fitness(genome, label, gen) -> cost.  `cache` (key -> record) prevents repeated simulations."""
+def run_ga(fitness_many, cache, rng, extra_seeds=()):
+    """fitness_many([(genome, label, gen)]) -> [cost].  A whole generation is passed at once, so it can be
+    simulated in parallel.  `cache` (key -> record) prevents repeated simulations."""
     pop, labels = [], []
     for name, g in list(all_seeds().items()) + [(lab, g) for g, lab in extra_seeds]:
         if all(key_of(g) != key_of(q) for q in pop):
@@ -739,9 +1253,11 @@ def run_ga(fitness, cache, rng, extra_seeds=()):
     while len(pop) < POP_SIZE:
         pop.append(random_staircase(rng))
         labels.append("")
-    pop, labels = pop[:POP_SIZE], labels[:POP_SIZE]
-
-    fit = [fitness(g, lab, 0) for g, lab in zip(pop, labels)]
+    # generation 0 simulates ALL parents (more than POP_SIZE is fine); only the best POP_SIZE survive
+    fit = fitness_many([(g, lab, 0) for g, lab in zip(pop, labels)])
+    if len(pop) > POP_SIZE:
+        keep = np.argsort(fit)[:POP_SIZE]
+        pop, fit = [pop[i] for i in keep], [fit[i] for i in keep]
     print(f"[GA] gen 0   best cost = {min(fit):.3f}")
 
     for gen in range(1, N_GENERATIONS + 1):
@@ -754,16 +1270,16 @@ def run_ga(fitness, cache, rng, extra_seeds=()):
                     break
             new_pop.append(child)
         pop = new_pop
-        fit = [fitness(g, "", gen) for g in pop]
+        fit = fitness_many([(g, "", gen) for g in pop])
         print(f"[GA] gen {gen}   best cost = {min(fit):.3f}")
 
 
 # =============================================================================
 # Plots
 # =============================================================================
-def draw_doping(ax, boxes, title):
-    """p = red, n = blue; darker = higher concentration (log scale). Black line = p/n interface."""
-    xs = np.linspace(-0.4e-6, 0.4e-6, 640)
+def draw_doping(ax, boxes, title, half_width=0.4e-6):
+    """p = blue, n = red; darker = higher concentration (log scale). Black line = p/n interface."""
+    xs = np.linspace(-half_width, half_width, 640 if half_width < 1e-6 else 1600)
     ys = np.linspace(Y_BOT - 30e-9, Y_TOP + 30e-9, 270)
     X, Y = np.meshgrid(xs, ys)
     net = np.zeros_like(X)
@@ -775,14 +1291,15 @@ def draw_doping(ax, boxes, title):
     with np.errstate(invalid="ignore", divide="ignore"):
         p_map = np.ma.masked_where(~(net > 0), np.log10(np.abs(net)))
         n_map = np.ma.masked_where(~(net < 0), np.log10(np.abs(net)))
-    ax.pcolormesh(xs * 1e9, ys * 1e9, p_map, cmap="Reds", vmin=15.5, vmax=19.0, shading="auto")
-    ax.pcolormesh(xs * 1e9, ys * 1e9, n_map, cmap="Blues", vmin=15.5, vmax=19.0, shading="auto")
+    ax.pcolormesh(xs * 1e9, ys * 1e9, p_map, cmap="Blues", vmin=15.5, vmax=19.0, shading="auto")
+    ax.pcolormesh(xs * 1e9, ys * 1e9, n_map, cmap="Reds", vmin=15.5, vmax=19.0, shading="auto")
     ax.contour(xs * 1e9, ys * 1e9, np.ma.masked_invalid(np.sign(net)), levels=[0], colors="k", linewidths=1.8)
-    outline = [(-400, Y_BOT * 1e9), (-400, Y_SLAB * 1e9), (-HC * 1e9, Y_SLAB * 1e9), (-HC * 1e9, Y_TOP * 1e9),
-               (HC * 1e9, Y_TOP * 1e9), (HC * 1e9, Y_SLAB * 1e9), (400, Y_SLAB * 1e9), (400, Y_BOT * 1e9),
-               (-400, Y_BOT * 1e9)]
+    hw = half_width * 1e9
+    outline = [(-hw, Y_BOT * 1e9), (-hw, Y_SLAB * 1e9), (-HC * 1e9, Y_SLAB * 1e9), (-HC * 1e9, Y_TOP * 1e9),
+               (HC * 1e9, Y_TOP * 1e9), (HC * 1e9, Y_SLAB * 1e9), (hw, Y_SLAB * 1e9), (hw, Y_BOT * 1e9),
+               (-hw, Y_BOT * 1e9)]
     ax.plot(*zip(*outline), color="0.35", lw=0.8)
-    ax.set_aspect("equal")
+    ax.set_aspect("equal" if half_width < 1e-6 else "auto")
     ax.set_title(title, fontsize=9)
     ax.set_xlabel("x [nm]")
     ax.set_ylabel("y [nm]")
@@ -790,23 +1307,48 @@ def draw_doping(ax, boxes, title):
 
 
 def plot_best_shape(g, title, png_path, npz_path):
-    fig, ax = plt.subplots(figsize=(9, 4.5))
+    fig, ax = plt.subplots(figsize=(10, 5))
     xs, ys, net = draw_doping(ax, grid_to_boxes(g), title)
+    ax.set_xticks(X_EDGES * 1e9)                                      # cell edges -> read dimensions off the axes
+    ax.set_yticks(Y_EDGES * 1e9)
+    ax.tick_params(labelsize=7)
+    ax.grid(alpha=0.25, lw=0.5)
+    for s_ in describe_shape(g)["segments"]:                          # length of every wall / step in nm
+        if s_["kind"].startswith("vertical"):
+            xm, ym = s_["x_nm"], 0.5 * (s_["y_top_nm"] + s_["y_bottom_nm"])
+        else:
+            xm, ym = 0.5 * (s_["x_from_nm"] + s_["x_to_nm"]), s_["y_nm"]
+        ax.text(xm, ym, f"{s_['length_nm']:.0f}", fontsize=7, ha="center", va="center",
+                bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="none", alpha=0.85))
     peak = "peak " if DOPING_MODEL == "pearson4" else ""
-    handles = [plt.Rectangle((0, 0), 1, 1, color="#3b78d8", label=f"p ({peak}{P_DOPING:.1e} cm$^{{-3}}$)"),
-               plt.Rectangle((0, 0), 1, 1, color="#e05a47", label=f"n ({peak}{N_DOPING:.1e} cm$^{{-3}}$)")]
+    handles = [plt.Rectangle((0, 0), 1, 1, color="#3b78d8", label=f"p ({peak}{P_DOPING:.1e}), p+ {P_MID:.0e}"),
+               plt.Rectangle((0, 0), 1, 1, color="#e05a47", label=f"n ({peak}{N_DOPING:.1e}), n+ {N_MID:.0e}")]
     ax.legend(handles=handles, loc="upper left", fontsize=8)
     fig.tight_layout()
     fig.savefig(png_path, dpi=200)
     np.savez(npz_path, x=xs, y=ys, net_doping_cm3=net, grid_p_is_true=g)   # + = p-type, - = n-type
 
 
+def plot_full_section(g, path):
+    """Whole cross-section (+-3 um): p / p+ / p++ on the left, n / n+ / n++ on the right."""
+    fig, ax = plt.subplots(figsize=(13, 3.6))
+    draw_doping(ax, grid_to_boxes(g), "Full cross-section: p++ | p+ | p | core | n | n+ | n++  (darker = higher doping)",
+                half_width=SLAB_WIDTH / 2.0 + M)
+    for x_um, txt in ((-2.3, "p++"), (-1.1, "p+"), (-0.5, "p"), (0.5, "n"), (1.1, "n+"), (2.3, "n++")):
+        ax.text(x_um * 1e3, Y_BOT * 1e9 - 14, txt, ha="center", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=170)
+
+
 def plot_seed_shapes(path):
     """Grid layout (cell indices, ridge / slab rows) + the seed shapes drawn on it."""
     seeds = all_seeds()
-    fig, axs = plt.subplots(2, 3, figsize=(13, 6.5))
+    n_pan = len(seeds) + 1
+    n_col = 4
+    n_row = int(np.ceil(n_pan / n_col))
+    fig, axs = plt.subplots(n_row, n_col, figsize=(3.6 * n_col, 2.6 * n_row), squeeze=False)
     xe, ye = X_EDGES * 1e9, Y_EDGES * 1e9
-    cmap = plt.matplotlib.colors.ListedColormap(["#065ce6", "#e62208"])        # n = red, p = blue
+    cmap = plt.matplotlib.colors.ListedColormap(["#e05a47", "#3b78d8"])        # n = red, p = blue
     panels = [("Grid layout (row, column)", None)] + list(seeds.items())
     for ax, (name, g) in zip(axs.flat, panels):
         if g is None:
@@ -815,8 +1357,9 @@ def plot_seed_shapes(path):
                 for c in range(NX):
                     ax.text(0.5 * (xe[c] + xe[c + 1]), 0.5 * (ROW_Y[r][0] + ROW_Y[r][1]) * 1e9,
                             f"{r},{c}", ha="center", va="center", fontsize=6)
-            ax.text(-HC * 1e9 - 12, 0.5 * (Y_SLAB + Y_TOP) * 1e9, "ridge\nrows", ha="right", va="center", fontsize=7)
-            ax.text(-HC * 1e9 - 12, 0.5 * (Y_BOT + Y_SLAB) * 1e9, "slab\nrows", ha="right", va="center", fontsize=7)
+            ax.text(HC * 1e9 + 8, 0.5 * (Y_SLAB + Y_TOP) * 1e9, "ridge\nrows", ha="left", va="center", fontsize=8)
+            ax.text(HC * 1e9 + 8, 0.5 * (Y_BOT + Y_SLAB) * 1e9, "slab\nrows", ha="left", va="center", fontsize=8)
+            ax.set_xlim(-HC * 1e9, HC * 1e9 + 70)
         else:
             ax.pcolormesh(xe, ye, np.flipud(g.astype(float)), cmap=cmap, vmin=0, vmax=1, edgecolors="w", linewidth=1)
         ax.axhline(Y_SLAB * 1e9, color="k", ls="--", lw=0.8)
@@ -826,7 +1369,7 @@ def plot_seed_shapes(path):
         ax.set_ylabel("y [nm]")
     for ax in list(axs.flat)[len(panels):]:
         ax.axis("off")
-    fig.suptitle(f"{NX} x {NROWS} cells (50 nm wide; red = p, blue = n; left/right slab outside the core is p / n)", fontsize=10)
+    fig.suptitle(f"{NX} x {NROWS} cells (50 nm wide; blue = p, red = n; left/right slab outside the core is p / n)", fontsize=10)
     fig.tight_layout()
     fig.savefig(path, dpi=170)
 
@@ -834,15 +1377,17 @@ def plot_seed_shapes(path):
 def plot_implant_profiles(path):
     d = np.linspace(0, CORE_HEIGHT, 400)
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(d * 1e9, PROFILES["p"](d), color="#3b78d8", lw=2, label="p implant (Pearson IV)")
-    ax.plot(d * 1e9, PROFILES["n"](d), color="#e05a47", lw=2, label="n implant (Pearson IV)")
-    ax.axhline(P_DOPING, color="#3b78d8", ls=":", lw=1, label="p peak / old constant")
-    ax.axhline(N_DOPING, color="#e05a47", ls=":", lw=1, label="n peak / old constant")
+    ax.plot(d * 1e9, P_DOPING * PROFILES["p"](d), color="#3b78d8", lw=2, label="p (next to core)")
+    ax.plot(d * 1e9, N_DOPING * PROFILES["n"](d), color="#e05a47", lw=2, label="n (next to core)")
+    ax.plot(d * 1e9, P_MID * PROFILES["p"](d), color="#3b78d8", lw=1.5, ls="--", label="p+ (slab middle)")
+    ax.plot(d * 1e9, N_MID * PROFILES["n"](d), color="#e05a47", lw=1.5, ls="--", label="n+ (slab middle)")
+    ax.set_yscale("log")
+    ax.set_ylim(1e15, 2 * max(P_MID, N_MID))
     ax.axvline(SLAB_HEIGHT * 1e9, color="k", ls="--", lw=0.8)
-    ax.text(SLAB_HEIGHT * 1e9 + 3, 0.02 * P_DOPING, "slab bottom", fontsize=7)
+    ax.text(SLAB_HEIGHT * 1e9 + 3, 2e15, "slab bottom", fontsize=7)
     ax.set_xlabel("depth below the top silicon surface [nm]")
     ax.set_ylabel("concentration [cm$^{-3}$]")
-    ax.set_title("Implant doping profiles used by CHARGE")
+    ax.set_title("Pearson IV implant profiles (p++ / n++ contacts are uniform 1e20)")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -860,8 +1405,9 @@ def plot_gallery(records, path, n=6):
     for ax, r in zip(axs.flat, ok):
         ax.axis("on")
         lab = f" [{r['label']}]" if r["label"] else ""
+        bw = f"  BW={r['f3db_ghz']:.0f} GHz" if "f3db_ghz" in r else ""
         draw_doping(ax, grid_to_boxes(np.array(r["grid"], dtype=bool)),
-                    f"VpiLpi={r['vpilpi']:.2f} V.cm  loss={r['avg_loss']:.1f} dB/cm  cost={r['cost']:.1f}{lab}")
+                    f"VpiLpi={r['vpilpi']:.2f} V.cm  loss={r['avg_loss']:.1f} dB/cm{bw}  cost={r['cost']:.1f}{lab}")
     fig.tight_layout()
     fig.savefig(path, dpi=170)
 
@@ -871,7 +1417,9 @@ def plot_scatter(records, best, path):
     if not ok:
         print("No successful simulation to plot.")
         return
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 5))
+    has_bw = USE_BANDWIDTH and all("f3db_ghz" in r for r in ok)
+    fig, axs = plt.subplots(1, 3 if has_bw else 2, figsize=(17 if has_bw else 12, 5))
+    a1, a_last = axs[0], axs[-1]
     sc = a1.scatter([r["avg_loss"] for r in ok], [r["vpilpi"] for r in ok], c=[r["gen"] for r in ok],
                     cmap="viridis", s=55, edgecolor="k", linewidth=0.4)
     for r in ok:
@@ -880,66 +1428,59 @@ def plot_scatter(records, best, path):
     a1.scatter(best["avg_loss"], best["vpilpi"], marker="*", s=380, c="red", edgecolor="k", label="best", zorder=5)
     a1.set_xlabel("Average loss [dB/cm]")
     a1.set_ylabel("Vpi*Lpi [V.cm]")
-    a1.set_title("All evaluated shapes (color = generation)")
+    a1.set_title("Efficiency vs loss (color = generation)")
     a1.grid(alpha=0.3)
     a1.legend()
     fig.colorbar(sc, ax=a1, label="generation")
 
+    if has_bw:
+        a2 = axs[1]
+        sc2 = a2.scatter([r["f3db_ghz"] for r in ok], [r["vpilpi"] for r in ok], c=[r["avg_loss"] for r in ok],
+                         cmap="plasma", s=55, edgecolor="k", linewidth=0.4)
+        a2.scatter(best["f3db_ghz"], best["vpilpi"], marker="*", s=380, c="red", edgecolor="k", zorder=5)
+        a2.set_xlabel("RC bandwidth f3dB [GHz]")
+        a2.set_ylabel("Vpi*Lpi [V.cm]")
+        a2.set_title("Efficiency vs speed (color = loss)")
+        a2.grid(alpha=0.3)
+        fig.colorbar(sc2, ax=a2, label="loss [dB/cm]")
+
     costs = [r["cost"] for r in records]
-    a2.plot(np.arange(1, len(costs) + 1), np.minimum.accumulate(costs), "r-", lw=2, label="best so far")
-    a2.scatter(np.arange(1, len(costs) + 1), costs, s=18, c="gray", label="each simulation")
-    a2.set_yscale("log")
-    a2.set_xlabel("Simulation #")
-    a2.set_ylabel("cost = Vpi*Lpi x loss [V.dB]")
-    a2.set_title("Convergence")
-    a2.grid(alpha=0.3, which="both")
-    a2.legend()
+    a_last.plot(np.arange(1, len(costs) + 1), np.minimum.accumulate(costs), "r-", lw=2, label="best so far")
+    a_last.scatter(np.arange(1, len(costs) + 1), costs, s=18, c="gray", label="each simulation")
+    a_last.set_yscale("log")
+    a_last.set_xlabel("Simulation #")
+    a_last.set_ylabel("cost")
+    a_last.set_title("Convergence")
+    a_last.grid(alpha=0.3, which="both")
+    a_last.legend()
     fig.tight_layout()
     fig.savefig(path, dpi=200)
 
 
 # =============================================================================
 if __name__ == "__main__":
+    if SHOW_PARENTS_FIRST or PREVIEW_ONLY:
+        show_parents()
+        if PREVIEW_ONLY:
+            raise SystemExit
     lum = get_lumapi()
     rng = np.random.default_rng(SEED)
-    charge_app = mode_app = None
+    charge_app = mode_app = pool = None
     records, cache = [], {}
 
     # never overwrite an earlier run: keep its history.json under a time-stamped name
-    old_hist = os.path.join(RES_DIR, f"history_nx{NX}.json")
+    old_hist = os.path.join(PROJECT_DIR, f"history_nx{NX}.json")
     if os.path.exists(old_hist):
         backup = os.path.join(PROJECT_DIR, f"history_backup_{time.strftime('%Y%m%d_%H%M%S')}.json")
         os.replace(old_hist, backup)
         print(f"Previous history saved as {backup}")
 
-    print("DiscoverJunction: Launching Lumerical CHARGE and MODE...")
+    print("DiscoverJunctionBWLaunching Lumerical CHARGE and MODE...")
     try:
         charge_app = lum.DEVICE(hide=not SHOW_GUI)
         mode_app = lum.MODE(hide=not SHOW_GUI)
 
-        def fitness(g, label, gen):
-            k = key_of(g)
-            if k in cache:
-                return cache[k]["cost"]
-            print(f"\n=== Simulation {len(records) + 1} (gen {gen}) {label} ===")
-            print("\n".join("     " + "".join("p" if v else "n" for v in row) for row in g))
-            rec = {"grid": g.astype(int).tolist(), "label": label, "gen": gen, "doping": DOPING_MODEL}
-            try:
-                r = evaluate(charge_app, mode_app, g, "eval_basic")
-                cost = r["vpilpi"] * abs(r["avg_loss"])
-                ok = bool(np.isfinite(cost))
-                rec.update(r, ok=ok, cost=float(cost) if ok else PENALTY)
-                print(f"  RESULT  Vpi*Lpi = {r['vpilpi']:.3f} V.cm   loss = {r['avg_loss']:.3f} dB/cm   "
-                      f"cost = {rec['cost']:.3f} V.dB")
-            except Exception as e:
-                print(f"  FAILED: {e}")
-                rec.update(ok=False, cost=PENALTY)
-            cache[k] = rec
-            records.append(rec)
-            with open(HISTORY_FILE, "w") as f:
-                json.dump(records, f, indent=2)
-            return rec["cost"]
-
+        history_path = os.path.join(RES_DIR, f"history_nx{NX}.json")
         if DOPING_MODEL == "pearson4" and USE_LUMERICAL_MOMENTS:
             print("Implant moments from Lumerical:")
             apply_lumerical_moments(charge_app)
@@ -948,7 +1489,17 @@ if __name__ == "__main__":
             plot_implant_profiles(os.path.join(PROJECT_DIR, "implant_profiles.png"))
         old_seeds = load_old_seeds(OLD_HISTORY_FILES, N_OLD_SEEDS) if OLD_HISTORY_FILES else []
 
-        run_ga(fitness, cache, rng, old_seeds)
+        pool = make_pool()                                  # after the settings are final (workers copy them)
+        if pool is not None:
+            print(f"Parallel evaluation with {N_WORKERS} worker sessions")
+
+        def fitness_many(items):
+            return run_candidates(items, cache, records, pool, (charge_app, mode_app), history_path)
+
+        run_ga(fitness_many, cache, rng, old_seeds)
+        if pool is not None:
+            pool.shutdown()
+            pool = None
 
         good = [r for r in records if r["ok"]]
         if not good:
@@ -957,26 +1508,34 @@ if __name__ == "__main__":
         best_g = np.array(best_rec["grid"], dtype=bool)
         print("\n##### BEST SHAPE (p = left/p-type, n = right/n-type) #####")
         print("\n".join("     " + "".join("p" if v else "n" for v in row) for row in best_g))
-        print(f"cost = {best_rec['cost']:.3f} V.dB  {best_rec['label']}")
+        print(f"cost = {best_rec['cost']:.3f}  {best_rec['label']}")
 
         # ---- final CHARGE + FDE run of the best shape (files are kept) -------------------
         print("\n=== Final CHARGE + FDE simulation of the best shape ===")
         final = evaluate(charge_app, mode_app, best_g, "best")
-        final.update(cost=final["vpilpi"] * abs(final["avg_loss"]), label=best_rec["label"])
+        final.update(cost=cost_function(final["vpilpi"], final["avg_loss"], final.get("f3db_ghz")),
+                     label=best_rec["label"])
         print(f"  Vpi*Lpi = {final['vpilpi']:.3f} V.cm | loss(0V) = {final['loss0']:.3f}, "
               f"loss(-2V) = {final['loss2']:.3f} dB/cm | dneff = {final['dneff']:.3e}")
+        if "f3db_ghz" in final:
+            print(f"  C = {final['C_pF_per_mm']:.3f} pF/mm | R = {final['R_ohm_mm']:.2f} ohm.mm | "
+                  f"f3dB(RC) = {final['f3db_ghz']:.1f} GHz")
+        dims = report_dimensions(best_g, os.path.join(PROJECT_DIR, "best_shape_dimensions.json"))
 
         # ---- save everything -----------------------------------------------------------
+        # ---- save everything -----------------------------------------------------------
         with open("results/metrics/best_shape.json", "w") as f:
-            json.dump({"doping_model": DOPING_MODEL, "p_peak_cm3": P_DOPING, "n_peak_cm3": N_DOPING,
-                       "p_implants": P_IMPLANTS, "n_implants": N_IMPLANTS,
+            json.dump({"setup": setup_tag(), "doping_model": DOPING_MODEL, "p_peak_cm3": P_DOPING,
+                       "n_peak_cm3": N_DOPING, "p_plus_cm3": P_MID, "n_plus_cm3": N_MID,
+                       "dimensions": dims, "p_implants": P_IMPLANTS, "n_implants": N_IMPLANTS,
                        "grid_rows_top_to_bottom_p_is_1": best_g.astype(int).tolist(),
                        "x_edges_nm": (X_EDGES * 1e9).tolist(), "y_edges_nm": (Y_EDGES * 1e9).tolist(),
                        "metrics": final, "n_simulations": len(records)}, f, indent=2)
                        
-        plot_best_shape(best_g, f"Best evolved junction   cost = {final['cost']:.2f} V.dB",
+        plot_best_shape(best_g, f"Best evolved junction  cost = {final['cost']:.2f}",
                         "results/plots/best_shape_doping.png",
                         "results/metrics/best_shape_doping.npz")
+        plot_full_section(best_g, "results/plots/best_shape_full_section.png")
         plot_gallery(records, "results/plots/top_shapes.png")
         plot_scatter(records, final, "results/plots/scatter_and_convergence.png")
         print(f"\nSaved results, plots and Lumerical projects to results/ folders!")
@@ -986,6 +1545,8 @@ if __name__ == "__main__":
         if SHOW_GUI:
             input("--> Lumerical is still open. Press Enter to close it and exit...")
     finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
         for app in (charge_app, mode_app):
             if app is not None:
                 try:

@@ -1,7 +1,140 @@
 {
+  "setup": "pearson4-bcea72fc",
   "doping_model": "pearson4",
   "p_peak_cm3": 5e+17,
   "n_peak_cm3": 5e+17,
+  "p_plus_cm3": 5e+18,
+  "n_plus_cm3": 5e+18,
+  "dimensions": {
+    "segments": [
+      {
+        "kind": "vertical wall (H)",
+        "x_nm": -150.0,
+        "y_top_nm": 110.0,
+        "y_bottom_nm": -20.000000000000007,
+        "length_nm": 130.0,
+        "depth_top_nm": 0.0,
+        "depth_bottom_nm": 130.0
+      },
+      {
+        "kind": "vertical wall (H)",
+        "x_nm": -100.0,
+        "y_top_nm": -20.000000000000007,
+        "y_bottom_nm": -65.00000000000001,
+        "length_nm": 45.00000000000001,
+        "depth_top_nm": 130.0,
+        "depth_bottom_nm": 175.0
+      },
+      {
+        "kind": "vertical wall (H)",
+        "x_nm": 0.0,
+        "y_top_nm": 23.333333333333336,
+        "y_bottom_nm": -65.00000000000001,
+        "length_nm": 88.33333333333334,
+        "depth_top_nm": 86.66666666666666,
+        "depth_bottom_nm": 175.0
+      },
+      {
+        "kind": "vertical wall (H)",
+        "x_nm": 50.0,
+        "y_top_nm": 66.66666666666669,
+        "y_bottom_nm": 23.333333333333336,
+        "length_nm": 43.33333333333335,
+        "depth_top_nm": 43.333333333333314,
+        "depth_bottom_nm": 86.66666666666666
+      },
+      {
+        "kind": "vertical wall (H)",
+        "x_nm": 150.0,
+        "y_top_nm": 66.66666666666669,
+        "y_bottom_nm": 23.333333333333336,
+        "length_nm": 43.33333333333335,
+        "depth_top_nm": 43.333333333333314,
+        "depth_bottom_nm": 86.66666666666666
+      },
+      {
+        "kind": "vertical wall (H)",
+        "x_nm": 150.0,
+        "y_top_nm": -20.000000000000007,
+        "y_bottom_nm": -110.0,
+        "length_nm": 90.0,
+        "depth_top_nm": 130.0,
+        "depth_bottom_nm": 220.0
+      },
+      {
+        "kind": "vertical wall (H)",
+        "x_nm": 200.0,
+        "y_top_nm": 23.333333333333336,
+        "y_bottom_nm": -20.000000000000007,
+        "length_nm": 43.33333333333334,
+        "depth_top_nm": 86.66666666666666,
+        "depth_bottom_nm": 130.0
+      },
+      {
+        "kind": "horizontal step (W)",
+        "y_nm": 66.66666666666669,
+        "x_from_nm": 50.0,
+        "x_to_nm": 150.0,
+        "length_nm": 100.0,
+        "depth_nm": 43.333333333333314
+      },
+      {
+        "kind": "horizontal step (W)",
+        "y_nm": 23.333333333333336,
+        "x_from_nm": 0.0,
+        "x_to_nm": 50.0,
+        "length_nm": 50.0,
+        "depth_nm": 86.66666666666666
+      },
+      {
+        "kind": "horizontal step (W)",
+        "y_nm": 23.333333333333336,
+        "x_from_nm": 150.0,
+        "x_to_nm": 200.0,
+        "length_nm": 50.0,
+        "depth_nm": 86.66666666666666
+      },
+      {
+        "kind": "horizontal step (W)",
+        "y_nm": -20.000000000000007,
+        "x_from_nm": -150.0,
+        "x_to_nm": -100.0,
+        "length_nm": 50.0,
+        "depth_nm": 130.0
+      },
+      {
+        "kind": "horizontal step (W)",
+        "y_nm": -20.000000000000007,
+        "x_from_nm": 150.0,
+        "x_to_nm": 200.0,
+        "length_nm": 50.0,
+        "depth_nm": 130.0
+      },
+      {
+        "kind": "horizontal step (W)",
+        "y_nm": -65.00000000000001,
+        "x_from_nm": -100.0,
+        "x_to_nm": 0.0,
+        "length_nm": 100.0,
+        "depth_nm": 175.0
+      }
+    ],
+    "summary": {
+      "interface_length_nm": 883.3333333333335,
+      "n_segments": 13,
+      "widest_step_W_nm": 100.0,
+      "tallest_wall_H_nm": 130.0,
+      "smallest_feature_nm": 43.33333333333334,
+      "cell_width_nm": 50.0,
+      "cell_heights_nm": [
+        43.333333333333314,
+        43.33333333333335,
+        43.33333333333334,
+        45.00000000000001,
+        44.999999999999986
+      ]
+    }
+  },
   "p_implants": [
     {
       "w": 1.0,
@@ -24,9 +157,45 @@
     [
       1,
       1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      1,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1,
+      1,
+      0,
+      0
+    ],
+    [
+      1,
+      1,
+      0,
+      0,
+      0,
       1,
       1,
       1,
+      1,
+      0
+    ],
+    [
+      1,
+      1,
+      1,
+      0,
+      0,
       1,
       1,
       1,
@@ -42,42 +211,6 @@
       1,
       1,
       1,
-      1,
-      0
-    ],
-    [
-      1,
-      1,
-      0,
-      0,
-      0,
-      1,
-      1,
-      1,
-      0,
-      0
-    ],
-    [
-      1,
-      1,
-      0,
-      0,
-      0,
-      0,
-      1,
-      0,
-      0,
-      0
-    ],
-    [
-      1,
-      1,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
       0,
       0
     ]
@@ -104,14 +237,14 @@
     110.0
   ],
   "metrics": {
-    "neff0": 2.568358114154185,
-    "dneff": 0.00012163973496237546,
-    "vpilpi": 1.2742546672593726,
-    "loss0": 2.983510496653787,
-    "loss2": 1.1539609670238125,
-    "avg_loss": 2.0687357318387996,
-    "cost": 2.636096161621824,
+    "neff0": 2.568345709227058,
+    "dneff": 0.0001371795596121217,
+    "vpilpi": 1.1299059454503717,
+    "loss0": 3.3655016563892413,
+    "loss2": 1.084172336190299,
+    "avg_loss": 2.22483699628977,
+    "cost": 4.097412301863823,
     "label": ""
   },
-  "n_simulations": 23
+  "n_simulations": 54
 }
