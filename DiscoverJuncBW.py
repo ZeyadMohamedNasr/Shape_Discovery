@@ -41,7 +41,7 @@ os.makedirs("carriers", exist_ok=True)
 os.makedirs("simulations", exist_ok=True)
 
 # Define the unique history file for this specific script
-HISTORY_FILE = "results/metrics/history_bw.json"
+HISTORY_FILE = "results/metrics/history_bandwidth_run.json"
 global_best_cost = float('inf')
 
 # =============================================================================
@@ -115,7 +115,7 @@ NROWS = NY_SLAB + NY_RIDGE
 
 # ---- Genetic algorithm ---------------------------------------------------------------------
 POP_SIZE = 8
-N_GENERATIONS = 6               # max simulated designs ~ POP_SIZE * (N_GENERATIONS + 1)
+N_GENERATIONS = 4               # max simulated designs ~ POP_SIZE * (N_GENERATIONS + 1)
 N_ELITE = 2
 # Best shapes of earlier runs (e.g. a constant-doping run) are re-simulated with the current doping model
 # and inserted in generation 0.  Example: ["./Shape_Discovery/history_backup_20250101_120000.json"]
@@ -131,10 +131,12 @@ PENALTY = 1e6
 # Set USE_BANDWIDTH = False for the old cost (VpiLpi x loss).  MIN_BANDWIDTH_GHZ > 0 adds a steep
 # penalty to designs slower than that.  The weights can be changed later without re-simulating
 # (refine_from_history.py recomputes the cost from the stored VpiLpi, loss and f3dB).
-USE_BANDWIDTH = True
-W_VPI, W_LOSS, W_BW = 5, 0.5, 1.0
+USE_BANDWIDTH = True           # VpiLpi-only run (speed not optimised)
+W_VPI, W_LOSS, W_BW = 5.0,0,0
+MAX_LOSS_DB_CM = None           # e.g. 40: soft cap, designs above it are penalised (None = ignore loss)
 REF_BW_GHZ = 50.0
-MIN_BANDWIDTH_GHZ = 0.0
+MIN_BANDWIDTH_GHZ = 30
+BW_PENALTY_EXP=10
 # Caughey-Thomas mobility (300 K, cm^2/Vs): (mu_min, mu
 # _max, N_ref [cm^-3], alpha) - used for R only
 MOBILITY = {"n": (92.0, 1360.0, 1.3e17, 0.91), "p": (47.7, 495.0, 6.3e16, 0.76)}
@@ -285,38 +287,77 @@ def from_p_counts(fracs):
 
 
 
-SEED_SHAPES = {                                   # p fraction per row, top -> bottom
-    "vertical": [0.5, 0.5, 0.5, 0.5, 0.5],
-    "M-like":   [1.0, 0.4, 0.7, 0.4, 0.5],
-    "stacked":  [1.0, 1.0, 1.0, 0.1, 0.1],
-    "comb":     [0.3, 0.7, 0.3, 0.7, 0.3],
+# ---- PARENT SHAPES (templates) ---------------------------------------------------------------
+# Each template is drawn as text: 'p' / 'n', top row first, the LAST N_SLAB_ROWS_T rows are the slab rows.
+# Any size works (they are resampled onto NX x NROWS), so you can edit/add templates freely.
+# Idea behind the list: a low VpiLpi needs (i) a long p-n interface (ii) lying inside the optical mode
+# (iii) with the depletion edge able to move sideways AND vertically.  Vertical / L / U / stepped /
+# bent interfaces do that better than the plain lateral one (see literature notes in the reply).
+N_SLAB_ROWS_T = 2
+SEED_TEMPLATES = {
+    # --- basic ---------------------------------------------------------------------------------
+    "lateral":     ["pppppnnnnn"] * 5,
+    "lateral-L3":  ["pppnnnnnnn"] * 5,                       # junction pushed to the p side
+    "stacked":     ["pppppppppp"] * 3 + ["pnnnnnnnnn"] * 2,
+    "vertical":    ["pppppppppp", "pppppppppp", "ppnnnnnnnn", "ppnnnnnnnn", "ppnnnnnnnn"],
+    "comb":        ["pppnnnnnnn", "pppppppnnn", "pppnnnnnnn", "pppppppnnn", "pppnnnnnnn"],
+    "W-shape":     ["pppnnnnnnn", "pppnnpppnn", "pppnnpppnn", "pppnnpppnn", "ppppppppnn"],
+    "W-inverted": ["pppppppnnn", "ppnnnppnnn", "ppnnnppnnn", "ppnnnppnnn", "ppnnnnnnnn"],
+    # --- L / U / S family (L: 0.37 V.cm double-pass exp.; U: 0.63 V.cm sim.) ----------------------
+    "L-shape":     ["pppnnnnnnn"] * 4 + ["ppppppppnn"],
+    "L-deep":      ["ppppnnnnnn"] * 3 + ["pnnnnnnnnn"] * 2,
+    "L-inv":       ["pppnnnnnnn"] * 3 + ["pppppppnnn"] * 2,
+    "S-shape":     ["ppppppppnn", "pppnnnnnnn", "pppnnnnnnn", "ppppppppnn", "pppnnnnnnn"],
+    "U-shape":     ["pppppppnnn", "pppnnppnnn", "pppnnppnnn", "pppnnnnnnn", "pppnnnnnnn"],
+    "U-deep":      ["ppppppppnn", "pppnnnnppn", "pppnnnnppn", "pppnnnnnnn", "pppnnnnnnn"],
+    # --- stepped / bent interfaces (long interface, sinusoidal-like cross section) -----------------
+    "step-down":   ["ppppppnnnn", "pppppnnnnn", "ppppnnnnnn", "pppnnnnnnn", "ppnnnnnnnn"],
+    "step-up":     ["ppnnnnnnnn", "pppnnnnnnn", "ppppnnnnnn", "pppppnnnnn", "ppppppnnnn"],
+    "bulge":       ["pppnnnnnnn", "pppppnnnnn", "ppppppnnnn", "pppppnnnnn", "pppnnnnnnn"],
+    "cap-thin":    ["pppppppppp", "ppnnnnnnnn", "ppnnnnnnnn", "ppnnnnnnnn", "ppnnnnnnnn"],
+    "double-step": ["pppppppnnn", "pppnnnnnnn", "ppppppnnnn", "pppnnnnnnn", "pppppnnnnn"],
 }
-def w_shape_genome(x_left=2, w2=3, w1=3, h_left=2, h_right=3):
-    """W-shaped interface (all sizes in cells; rows counted from the top).
-
-      x_left : p columns left of the n tooth      w2 : width of the n tooth      (image: W2)
-      w1     : width of the p pocket right of it  (image: W1)
-      h_left : rows of p above the n tooth        (image: H-left)
-      h_right: rows the p pocket reaches down     (image: H-right)
-    """
-    g = np.zeros((NROWS, NX), dtype=bool)
-    g[:, :x_left] = True                                       # left wall, p all the way down
-    g[:h_left, x_left:x_left + w2] = True                      # p cap above the n tooth
-    g[:h_right, x_left + w2:x_left + w2 + w1] = True           # p pocket beside the tooth
-    return repair(g)
+SEED_SHAPES = {}
+SEED_GENOMES = {}
 
 
-
-
-
-SEED_GENOMES = {"W-shape": w_shape_genome()}                   # shapes a row-count cannot describe
+def from_template(rows, n_slab_rows=None):
+    """Resample a text template onto the current NX x NROWS grid (ridge rows and slab rows kept apart)."""
+    n_slab_rows = N_SLAB_ROWS_T if n_slab_rows is None else n_slab_rows
+    t = np.array([[ch == "p" for ch in row] for row in rows])
+    nt = t.shape[0] - n_slab_rows
+    pick = lambda n_new, n_old, off: off + np.minimum(((np.arange(n_new) + 0.5) * n_old / n_new).astype(int), n_old - 1)
+    ri = np.concatenate([pick(NROWS - NY_SLAB, nt, 0), pick(NY_SLAB, n_slab_rows, nt)])
+    ci = np.minimum(((np.arange(NX) + 0.5) * t.shape[1] / NX).astype(int), t.shape[1] - 1)
+    return repair(t[np.ix_(ri, ci)])
 
 
 def all_seeds():
-    seeds = {name: from_p_counts(fr) for name, fr in SEED_SHAPES.items()}
+    seeds = {name: from_template(rows) for name, rows in SEED_TEMPLATES.items()}
+    seeds.update({name: from_p_counts(fr) for name, fr in SEED_SHAPES.items()})
     seeds.update(SEED_GENOMES)
     return seeds
+SHOW_PARENTS_FIRST = True       # draw all parents at start; close the window to continue
+PREVIEW_ONLY = False            # True = only draw the parents and exit (no Lumerical)
 
+def show_parents():
+    seeds = all_seeds()
+    n_col = 4
+    n_row = int(np.ceil(len(seeds) / n_col))
+    fig, axs = plt.subplots(n_row, n_col, figsize=(3.2 * n_col, 2.2 * n_row), squeeze=False)
+    cmap = plt.matplotlib.colors.ListedColormap(["#e05a47", "#3b78d8"])   # n red, p blue
+    for ax, (name, g) in zip(axs.flat, seeds.items()):
+        ax.imshow(g, cmap=cmap, vmin=0, vmax=1, aspect="equal")
+        ax.set_xticks(np.arange(-0.5, NX), minor=True)
+        ax.set_yticks(np.arange(-0.5, NROWS), minor=True)
+        ax.grid(which="minor", color="w", lw=1)
+        ax.axhline(NROWS - NY_SLAB - 0.5, color="k", ls="--", lw=0.8)    # slab top
+        ax.set_title(name, fontsize=9)
+        ax.set_xticks([]); ax.set_yticks([])
+    for ax in list(axs.flat)[len(seeds):]:
+        ax.axis("off")
+    fig.tight_layout()
+    plt.show()
 
 def load_old_seeds(files, n):
     """Best n shapes of earlier history files -> [(genome, label)] (re-simulated with the current model)."""
@@ -402,15 +443,16 @@ class CapacitanceError(RuntimeError):
 class SweepUnsupported(RuntimeError):
     pass
 
-
 def cost_function(vpilpi, loss, f3db_ghz=None):
     c = vpilpi ** W_VPI * abs(loss) ** W_LOSS
+    if MAX_LOSS_DB_CM is not None and abs(loss) > MAX_LOSS_DB_CM:
+        c *= (abs(loss) / MAX_LOSS_DB_CM) ** 3
     if USE_BANDWIDTH:
         if f3db_ghz is None or not np.isfinite(f3db_ghz) or f3db_ghz <= 0:
             return float("inf")
-        c *= (REF_BW_GHZ / f3db_ghz) ** W_BW
         if f3db_ghz < MIN_BANDWIDTH_GHZ:
-            c *= (MIN_BANDWIDTH_GHZ / f3db_ghz) ** 3
+            c *= (MIN_BANDWIDTH_GHZ / f3db_ghz) ** BW_PENALTY_EXP   # slower = worse, but still ordered
+        c *= (REF_BW_GHZ / f3db_ghz) ** W_BW
     return c
 
 
@@ -1027,7 +1069,8 @@ def evaluate(charge, mode, g, tag):
 _SETTINGS_KEYS = ("DOPING_MODEL", "P_DOPING", "N_DOPING", "P_MID", "N_MID", "P_IMPLANTS", "N_IMPLANTS", "SLICE",
                   "MASK_SHIFT", "MESH_JUNCTION", "MESH_OPTICAL", "FDE_MESH", "LAMBDA", "VOLTAGE_SWING",
                   "USE_BANDWIDTH", "CHARGE_SWEEP", "SWEEP_POINTS", "SOLVER_OPTIONS",
-                  "W_VPI", "W_LOSS", "W_BW", "REF_BW_GHZ", "MIN_BANDWIDTH_GHZ")
+                  "W_VPI", "W_LOSS", "W_BW", "REF_BW_GHZ", "MIN_BANDWIDTH_GHZ",
+                  "BW_PENALTY_EXP", "MAX_LOSS_DB_CM")
 _W = {}                                                    # per-worker Lumerical sessions
 
 
@@ -1211,9 +1254,11 @@ def run_ga(fitness_many, cache, rng, extra_seeds=()):
     while len(pop) < POP_SIZE:
         pop.append(random_staircase(rng))
         labels.append("")
-    pop, labels = pop[:POP_SIZE], labels[:POP_SIZE]
-
+    # generation 0 simulates ALL parents (more than POP_SIZE is fine); only the best POP_SIZE survive
     fit = fitness_many([(g, lab, 0) for g, lab in zip(pop, labels)])
+    if len(pop) > POP_SIZE:
+        keep = np.argsort(fit)[:POP_SIZE]
+        pop, fit = [pop[i] for i in keep], [fit[i] for i in keep]
     print(f"[GA] gen 0   best cost = {min(fit):.3f}")
 
     for gen in range(1, N_GENERATIONS + 1):
@@ -1299,7 +1344,10 @@ def plot_full_section(g, path):
 def plot_seed_shapes(path):
     """Grid layout (cell indices, ridge / slab rows) + the seed shapes drawn on it."""
     seeds = all_seeds()
-    fig, axs = plt.subplots(2, 3, figsize=(13, 6.5))
+    n_pan = len(seeds) + 1
+    n_col = 4
+    n_row = int(np.ceil(n_pan / n_col))
+    fig, axs = plt.subplots(n_row, n_col, figsize=(3.6 * n_col, 2.6 * n_row), squeeze=False)
     xe, ye = X_EDGES * 1e9, Y_EDGES * 1e9
     cmap = plt.matplotlib.colors.ListedColormap(["#e05a47", "#3b78d8"])        # n = red, p = blue
     panels = [("Grid layout (row, column)", None)] + list(seeds.items())
@@ -1412,6 +1460,10 @@ def plot_scatter(records, best, path):
 
 # =============================================================================
 if __name__ == "__main__":
+    if SHOW_PARENTS_FIRST or PREVIEW_ONLY:
+        show_parents()
+        if PREVIEW_ONLY:
+            raise SystemExit
     lum = get_lumapi()
     rng = np.random.default_rng(SEED)
     charge_app = mode_app = pool = None
@@ -1473,7 +1525,7 @@ if __name__ == "__main__":
 
         # ---- save everything -----------------------------------------------------------
         # ---- save everything -----------------------------------------------------------
-        with open("results/metrics/best_shape.json", "w") as f:
+        with open("results/metrics/best_shape_BW.json", "w") as f:
             json.dump({"setup": setup_tag(), "doping_model": DOPING_MODEL, "p_peak_cm3": P_DOPING,
                        "n_peak_cm3": N_DOPING, "p_plus_cm3": P_MID, "n_plus_cm3": N_MID,
                        "dimensions": dims, "p_implants": P_IMPLANTS, "n_implants": N_IMPLANTS,
@@ -1482,8 +1534,8 @@ if __name__ == "__main__":
                        "metrics": final, "n_simulations": len(records)}, f, indent=2)
                        
         plot_best_shape(best_g, f"Best evolved junction  cost = {final['cost']:.2f}",
-                        "results/plots/best_shape_doping.png",
-                        "results/metrics/best_shape_doping.npz")
+                        "results/plots/best_shape_BW_doping.png",
+                        "results/metrics/best_shape_BW_doping.npz")
         plot_full_section(best_g, "results/plots/best_shape_full_section.png")
         plot_gallery(records, "results/plots/top_shapes.png")
         plot_scatter(records, final, "results/plots/scatter_and_convergence.png")
